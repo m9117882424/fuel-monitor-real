@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 
 import pandas as pd
@@ -182,22 +183,47 @@ def _read_one_driver_file(path: Path) -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True)
 
 
-def load_driver_registry() -> pd.DataFrame:
+def _driver_files_signature(base_dir: Path, glob_pattern: str) -> tuple[tuple[str, int, int], ...]:
+    """
+    Cache key based on file names, mtimes and sizes.
+    If a roster file is replaced or edited, the key changes and cache refreshes automatically.
+    """
+    if not base_dir.exists():
+        return tuple()
+
+    signature = []
+    for path in sorted(base_dir.glob(glob_pattern)):
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        signature.append((str(path), int(stat.st_mtime), int(stat.st_size)))
+    return tuple(signature)
+
+
+@lru_cache(maxsize=8)
+def _load_driver_registry_cached(
+    driver_enabled: bool,
+    driver_input_dir: str,
+    driver_glob: str,
+    driver_sheet_name: str,
+    files_signature: tuple[tuple[str, int, int], ...],
+) -> pd.DataFrame:
     """
     Возвращает ИСТОРИЮ разнарядок, а не только последнюю запись по машине.
-    Дальше report_service подбирает запись по ближайшей дате к заправке.
+    Dashboard calls this many times; reading Excel on every request is too expensive.
     """
-    if not settings.driver_enabled:
+    if not driver_enabled:
         return _empty_df()
 
-    if not settings.driver_input_dir:
+    if not driver_input_dir:
         return _empty_df()
 
-    base_dir = Path(settings.driver_input_dir)
+    base_dir = Path(driver_input_dir)
     if not base_dir.exists():
         return _empty_df()
 
-    files = sorted(base_dir.glob(settings.driver_glob))
+    files = [Path(item[0]) for item in files_signature]
     if not files:
         return _empty_df()
 
@@ -223,3 +249,21 @@ def load_driver_registry() -> pd.DataFrame:
     ]).reset_index(drop=True)
 
     return full
+
+
+def load_driver_registry() -> pd.DataFrame:
+    base_dir = Path(settings.driver_input_dir) if settings.driver_input_dir else Path("")
+    files_signature = _driver_files_signature(base_dir, settings.driver_glob) if settings.driver_input_dir else tuple()
+
+    # Return a copy so downstream code can mutate columns without polluting cached data.
+    return _load_driver_registry_cached(
+        bool(settings.driver_enabled),
+        str(settings.driver_input_dir or ""),
+        str(settings.driver_glob or "*.xlsx"),
+        str(settings.driver_sheet_name or PRIMARY_SHEET_NAME),
+        files_signature,
+    ).copy()
+
+
+def clear_driver_registry_cache() -> None:
+    _load_driver_registry_cached.cache_clear()
