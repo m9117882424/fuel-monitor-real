@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pandas as pd
+from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
 from ..config import settings
@@ -45,42 +46,71 @@ def _empty_summary() -> pd.DataFrame:
     ])
 
 
-def build_monthly_vehicle_summary(db: Session, year_month: str | None = None) -> pd.DataFrame:
-    ym = year_month or current_year_month()
-    events = db.query(FuelEvent).filter(FuelEvent.year_month == ym).all()
-    if not events:
-        return _empty_summary()
+def _safe_float(value, default: float = 0.0) -> float:
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
-    rows = []
-    for e in events:
-        rows.append({
-            'plate': normalize_plate(e.plate),
-            'source': e.source,
-            'liters': float(e.liters or 0),
-            'amount_try': float(e.amount_try or 0),
-            'event_dt': e.event_dt,
-        })
 
-    df = pd.DataFrame(rows)
-    if df.empty:
-        return _empty_summary()
+def _fetch_monthly_aggregates(db: Session, ym: str) -> pd.DataFrame:
+    """
+    Aggregate fuel events in SQL instead of loading all monthly rows into Python.
+    The dashboard needs per-vehicle totals, not every transaction payload.
+    """
+    rows = (
+        db.query(
+            FuelEvent.plate.label('plate'),
+            func.count(FuelEvent.id).label('tx_count'),
+            func.max(FuelEvent.event_dt).label('last_event_dt'),
+            func.sum(case((FuelEvent.source == 'turpak', FuelEvent.liters), else_=0)).label('turpak_liters'),
+            func.sum(case((FuelEvent.source == 'shell_excel', FuelEvent.liters), else_=0)).label('shell_liters'),
+            func.sum(case((FuelEvent.source == 'petrol', FuelEvent.liters), else_=0)).label('petrol_liters'),
+            func.sum(FuelEvent.liters).label('total_liters'),
+            func.sum(FuelEvent.amount_try).label('total_amount_try'),
+        )
+        .filter(FuelEvent.year_month == ym)
+        .group_by(FuelEvent.plate)
+        .all()
+    )
+
+    if not rows:
+        return pd.DataFrame()
+
+    source_rows = (
+        db.query(FuelEvent.plate, FuelEvent.source)
+        .filter(FuelEvent.year_month == ym)
+        .distinct()
+        .all()
+    )
+    source_map: dict[str, set[str]] = {}
+    for plate, source in source_rows:
+        plate_norm = normalize_plate(plate)
+        if not plate_norm:
+            continue
+        source_map.setdefault(plate_norm, set()).add(str(source))
 
     grouped_rows = []
-    for plate, sub in df.groupby('plate'):
-        turpak_liters = float(sub.loc[sub['source'] == 'turpak', 'liters'].sum())
-        shell_liters = float(sub.loc[sub['source'] == 'shell_excel', 'liters'].sum())
-        petrol_liters = float(sub.loc[sub['source'] == 'petrol', 'liters'].sum())
+    for row in rows:
+        plate = normalize_plate(row.plate)
+        if not plate:
+            continue
+
+        turpak_liters = _safe_float(row.turpak_liters)
+        shell_liters = _safe_float(row.shell_liters)
+        petrol_liters = _safe_float(row.petrol_liters)
         cards_liters = shell_liters + petrol_liters
-        total_liters = turpak_liters + cards_liters
-        total_amount_try = float(sub['amount_try'].sum())
-        sources = ', '.join(sorted(set(sub['source'].astype(str))))
+        total_liters = _safe_float(row.total_liters)
+        total_amount_try = _safe_float(row.total_amount_try)
 
         grouped_rows.append({
             'year_month': ym,
             'plate': plate,
-            'tx_count': int(len(sub)),
-            'sources': sources,
-            'last_event_dt': sub['event_dt'].max(),
+            'tx_count': int(row.tx_count or 0),
+            'sources': ', '.join(sorted(source_map.get(plate, set()))),
+            'last_event_dt': row.last_event_dt,
             'turpak_liters': round(turpak_liters, 3),
             'shell_liters': round(shell_liters, 3),
             'petrol_liters': round(petrol_liters, 3),
@@ -89,7 +119,14 @@ def build_monthly_vehicle_summary(db: Session, year_month: str | None = None) ->
             'total_amount_try': round(total_amount_try, 2),
         })
 
-    summary = pd.DataFrame(grouped_rows)
+    return pd.DataFrame(grouped_rows)
+
+
+def build_monthly_vehicle_summary(db: Session, year_month: str | None = None) -> pd.DataFrame:
+    ym = year_month or current_year_month()
+    summary = _fetch_monthly_aggregates(db, ym)
+    if summary.empty:
+        return _empty_summary()
 
     limit_rows = db.query(VehicleLimit).all()
     if limit_rows:
