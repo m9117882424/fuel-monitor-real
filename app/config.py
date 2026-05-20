@@ -22,6 +22,16 @@ class Settings(BaseSettings):
     shell_input_path: str = ''
     shell_input_dir: str = ''
     shell_glob: str = '*.xlsx'
+    shell_use_portal: bool = False
+    shell_portal_base_url: str = 'https://sfs.turkiyeshell.com'
+    shell_portal_customer_code: str = ''
+    shell_portal_username: str = ''
+    shell_portal_password: str = ''
+    shell_portal_page_size: int = 100
+    shell_portal_max_pages: int = 100
+    shell_portal_show_utts_only: bool = False
+    shell_portal_uninvoiced: bool = False
+    shell_portal_is_reseller: bool = False
 
     petrol_enabled: bool = True
     petrol_base_url: str = 'https://automaticservices.petrolofisi.com.tr/AUTOMATIC_REST_SERVICES'
