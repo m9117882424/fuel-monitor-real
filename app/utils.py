@@ -37,6 +37,61 @@ COMMON_EVENT_COLUMNS = [
 ]
 
 
+SHELL_TURKISH_COLUMN_MAP = {
+    'Departman Adı': 'Название группы',
+    'Kart Numarası': 'Номер карты',
+    'Plaka': 'Номерной знак',
+    'Cihaz Tipi': 'Тип устройства',
+    'Kilometre Bilgisi': 'Километраж',
+    'Ürün': 'Вид топлива',
+    'Birim Fiyat': 'Цена (тл)',
+    'Miktar (LT)': 'Общий литр (л)',
+    'Tutar (TL)': 'Стоимость (тл)',
+    'İşlem Tarihi': 'Date',
+    'İstasyon Kodu': 'Код станции',
+    'İstasyon Adı': 'Название станции',
+    'İstasyon İli': 'Провинция',
+}
+
+SHELL_TURKISH_REQUIRED_COLUMNS = {
+    'İşlem Tarihi',
+    'İstasyon Adı',
+    'Plaka',
+    'Miktar (LT)',
+    'Tutar (TL)',
+}
+
+_ORIGINAL_READ_EXCEL = pd.read_excel
+
+
+def _normalize_shell_turkish_columns(df: Any) -> Any:
+    """Rename Turkish Shell report headers to the legacy Russian header set."""
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return df
+
+    stripped_columns = {str(column).strip() for column in df.columns}
+    if not SHELL_TURKISH_REQUIRED_COLUMNS.issubset(stripped_columns):
+        return df
+
+    rename_map = {
+        column: SHELL_TURKISH_COLUMN_MAP[str(column).strip()]
+        for column in df.columns
+        if str(column).strip() in SHELL_TURKISH_COLUMN_MAP
+    }
+    return df.rename(columns=rename_map) if rename_map else df
+
+
+def _read_excel_with_shell_header_normalization(*args: Any, **kwargs: Any) -> Any:
+    result = _ORIGINAL_READ_EXCEL(*args, **kwargs)
+    if isinstance(result, dict):
+        return {key: _normalize_shell_turkish_columns(value) for key, value in result.items()}
+    return _normalize_shell_turkish_columns(result)
+
+
+if getattr(pd.read_excel, '__name__', '') != '_read_excel_with_shell_header_normalization':
+    pd.read_excel = _read_excel_with_shell_header_normalization
+
+
 def now_local() -> datetime:
     return datetime.now(ZoneInfo(settings.timezone))
 
