@@ -988,6 +988,114 @@ def build_vehicle_metadata_lookup(
     return lookup
 
 
+
+EMPTY_METADATA_VALUES = {
+    "",
+    "-",
+    "--",
+    "---",
+    "-----",
+    "нет данных",
+    "Нет данных",
+    "N/A",
+    "n/a",
+    "None",
+    "none",
+}
+
+
+def clean_metadata_value(value: Any) -> str:
+    text = str(value or "").strip()
+    if text in EMPTY_METADATA_VALUES:
+        return ""
+    return text
+
+
+def get_profile_field(item: Dict[str, Any], field_name: str) -> str:
+    for block_name in ("pflds", "profile", "flds", "aflds"):
+        block = item.get(block_name)
+        if not isinstance(block, dict):
+            continue
+
+        for field in block.values():
+            if not isinstance(field, dict):
+                continue
+            if str(field.get("n") or "").strip() == field_name:
+                return clean_metadata_value(field.get("v"))
+
+    return ""
+
+
+def build_unit_properties_lookup(client: WialonClient) -> Dict[str, Dict[str, str]]:
+    """
+    Основной справочник оргструктуры из свойств объектов Wialon:
+    Фирма    = pflds.brand
+    Дирекция = pflds.vehicle_type
+    Госномер = pflds.registration_plate или имя объекта
+    """
+    data = client.call(
+        "core/search_items",
+        {
+            "spec": {
+                "itemsType": "avl_unit",
+                "propName": "sys_name",
+                "propValueMask": "*",
+                "sortType": "sys_name",
+            },
+            "force": 1,
+            "flags": 4611686018427387903,
+            "from": 0,
+            "to": 0,
+        },
+    )
+
+    items = data.get("items", []) if isinstance(data, dict) else []
+    lookup: Dict[str, Dict[str, str]] = {}
+
+    for item in items:
+        unit_name = clean_metadata_value(item.get("nm"))
+        registration_plate = get_profile_field(item, "registration_plate")
+        gos_number = registration_plate or split_grouping(unit_name)[0] or unit_name
+        gos_number = clean_metadata_value(gos_number)
+
+        if not gos_number:
+            continue
+
+        firm = get_profile_field(item, "brand")
+        department = get_profile_field(item, "vehicle_type")
+
+        lookup[gos_number] = {
+            "firm": firm,
+            "department": department,
+            "metadata_source": "wialon_unit_pflds",
+        }
+
+    print(
+        "OK: справочник из свойств объектов Wialon: "
+        f"объектов={len(items)}, госномеров={len(lookup)}"
+    )
+    return lookup
+
+
+def find_unit_properties(
+    unit_lookup: Dict[str, Dict[str, str]],
+    gos_number: str,
+) -> Dict[str, str]:
+    if not unit_lookup:
+        return {}
+
+    if gos_number in unit_lookup:
+        return unit_lookup[gos_number]
+
+    target = re.sub(r"[^A-ZА-ЯЁ0-9]", "", str(gos_number or "").upper())
+
+    for key, value in unit_lookup.items():
+        key_norm = re.sub(r"[^A-ZА-ЯЁ0-9]", "", str(key or "").upper())
+        if key_norm == target:
+            return value
+
+    return {}
+
 def find_vehicle_metadata(
     metadata_lookup: Dict[str, Dict[Any, Dict[str, str]]],
     gos_number: str,
@@ -1014,6 +1122,7 @@ def parse_dashboard_rows(
     table_name: str,
     table_index: int,
     metadata_lookup: Optional[Dict[str, Dict[Any, Dict[str, str]]]] = None,
+    unit_properties_lookup: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     normalized_rows = [
         normalize_wialon_row(row, headers)
@@ -1052,10 +1161,21 @@ def parse_dashboard_rows(
             print(f"WARNING: строка {idx}: пустое время, строка пропущена: {row}")
             continue
 
+        unit_properties = find_unit_properties(unit_properties_lookup or {}, gos_number)
         metadata = find_vehicle_metadata(metadata_lookup or {}, gos_number, event_datetime)
 
-        firm = str(row.get("Фирма") or metadata.get("firm") or "").strip()
-        department = str(row.get("Дирекция") or metadata.get("department") or "").strip()
+        firm = (
+            clean_metadata_value(unit_properties.get("firm"))
+            or clean_metadata_value(metadata.get("firm"))
+            or clean_metadata_value(row.get("Фирма"))
+            or "-----"
+        )
+        department = (
+            clean_metadata_value(unit_properties.get("department"))
+            or clean_metadata_value(metadata.get("department"))
+            or clean_metadata_value(row.get("Дирекция"))
+            or "-----"
+        )
 
         if not firm and not department:
             print(
@@ -1241,6 +1361,7 @@ def main() -> None:
             client=client,
             report_result=report_result,
         )
+        unit_properties_lookup = build_unit_properties_lookup(client)
 
         dashboard_rows, normalized_rows = parse_dashboard_rows(
             raw_rows=raw_rows,
@@ -1248,6 +1369,7 @@ def main() -> None:
             table_name=table_name,
             table_index=table_index,
             metadata_lookup=metadata_lookup,
+            unit_properties_lookup=unit_properties_lookup,
         )
 
         normalized_path = OUT_DIR / f"normalized_table_{table_index}_{safe_filename(table_name)}_{report_day}.json"
