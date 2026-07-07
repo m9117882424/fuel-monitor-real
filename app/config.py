@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     petrol_invoice_type: str = ''
     petrol_invoice_period: str = ''
     petrol_use_api: bool = True
+    petrol_proxy_url: str = ''
     petrol_input_path: str = ''
     petrol_input_dir: str = ''
     petrol_glob: str = '*'
