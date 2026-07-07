@@ -16,6 +16,7 @@ class PetrolAutomaticClient:
     user_name: str
     user_password: str
     timeout: int = 60
+    proxy_url: str | None = None
 
     def __post_init__(self) -> None:
         self.base_url = self.base_url.rstrip('/')
@@ -24,6 +25,11 @@ class PetrolAutomaticClient:
             'Accept': 'application/json',
             'Content-Type': 'application/json',
         })
+        if self.proxy_url:
+            self.session.proxies.update({
+                'http': self.proxy_url,
+                'https': self.proxy_url,
+            })
 
     def _request_info(self) -> dict[str, Any]:
         data = {
