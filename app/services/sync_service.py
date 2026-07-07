@@ -160,6 +160,7 @@ def sync_petrol(db: Session) -> SourceSyncResult:
                 user_name=settings.petrol_user_name,
                 user_password=settings.petrol_user_password,
                 timeout=180,
+                proxy_url=settings.petrol_proxy_url or None,
             )
 
             frames: list[pd.DataFrame] = []
@@ -179,6 +180,8 @@ def sync_petrol(db: Session) -> SourceSyncResult:
             all_events = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
             rows_loaded = save_events(db, all_events)
             detail = f'api GET_SALES_WITH_INVOICE_INFOS {start_dt} -> {end_dt}, chunks={chunk_count}'
+            if settings.petrol_proxy_url:
+                detail += ', proxy=enabled'
             _track_run_finish(db, run, rows_loaded, detail=detail)
             return SourceSyncResult(source='petrol', rows_loaded=rows_loaded, detail=detail)
 
