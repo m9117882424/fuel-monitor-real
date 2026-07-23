@@ -13,7 +13,9 @@ logs/
 *.sqlite
 
 reports/
+diagnostics/
 turpak_import_output/
+backups/
 
 *.xlsx
 *.xls
