@@ -96,6 +96,17 @@ Fuel Providers / Internal Reports / Manual Uploads
 - `dispatch_alerts()`
 - `export_report()`
 
+### Два контура Turpak
+
+В проекте используются два независимых набора данных Turpak:
+
+- `fuel_events` — только группа `#TSM BINEK ARAC` для Fuel Monitor;
+- `turpak_fuel_events_all` — полный Turpak по всем группам для Metabase.
+
+Представление `fuel_three_sources_v` должно читать Turpak из `turpak_fuel_events_all`, а Shell и Petrol — из `fuel_events`.
+
+Подробная схема, команды полной загрузки, backfill, dry-run, проверки и восстановления представления описаны в документе [`docs/turpak-data-pipelines.md`](docs/turpak-data-pipelines.md).
+
 ## Shell TTS SOAP
 
 Основной источник Shell — метод `GetCustomerSalesTransaction` старого TTS WebService.
