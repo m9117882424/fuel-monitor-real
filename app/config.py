@@ -19,6 +19,14 @@ class Settings(BaseSettings):
     turpak_enabled: bool = True
 
     shell_enabled: bool = True
+    shell_use_api: bool = True
+    shell_base_url: str = 'https://tts.turkiyeshell.com/TTS/TTSWebServices.asmx'
+    shell_customer_code: str = ''
+    shell_user_id: str = ''
+    shell_password: str = ''
+    shell_branch_code: str = ''
+    shell_timeout_seconds: int = 120
+    shell_file_fallback_enabled: bool = True
     shell_input_path: str = ''
     shell_input_dir: str = ''
     shell_glob: str = '*.xlsx'
