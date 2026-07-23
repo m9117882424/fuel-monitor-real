@@ -14,6 +14,7 @@ from ..io_utils import newest_matching_file, read_shell_excel, read_tabular_file
 from ..models import FuelEvent, ImportRun
 from ..normalizers import normalize_petrol_api_payload, normalize_petrol_df, normalize_shell_df, normalize_turpak_sales
 from ..sources.petrol import PetrolAutomaticClient
+from ..sources.shell_tts import ShellTtsClient, shell_transactions_to_legacy_df
 from ..sources.turpak import TurpakClient
 from ..utils import current_year_month, format_petrol_dt, month_start_local, now_local
 from .alert_service import build_alert_candidates, dispatch_alerts, filter_unsent_alerts, refresh_alert_state
@@ -119,30 +120,90 @@ def _zero_turpak_amounts(db: Session) -> int:
     return int(result.rowcount or 0)
 
 
+def _sync_shell_file_fallback(db: Session, run: ImportRun, api_error: str | None = None) -> SourceSyncResult:
+    path = None
+    if settings.shell_input_path:
+        path = Path(settings.shell_input_path)
+    elif settings.shell_input_dir:
+        path = newest_matching_file(settings.shell_input_dir, settings.shell_glob)
+
+    if not path or not path.exists():
+        detail = 'Shell API is not configured and Shell file not found'
+        if api_error:
+            detail = f'Shell API error: {api_error}; fallback file not found'
+        _track_run_finish(db, run, 0, status='error' if api_error else 'skipped', detail=detail)
+        return SourceSyncResult(source='shell_excel', rows_loaded=0, detail=detail)
+
+    raw = read_shell_excel(path)
+    events = normalize_shell_df(raw)
+    rows_loaded = save_events(db, events)
+    detail = f'file fallback {path}'
+    if api_error:
+        detail += f'; API error: {api_error}'
+    _track_run_finish(db, run, rows_loaded, detail=detail)
+    return SourceSyncResult(source='shell_excel', rows_loaded=rows_loaded, detail=detail)
+
+
 def sync_shell(db: Session) -> SourceSyncResult:
     run = _track_run_start(db, 'shell_excel')
     try:
-        path = None
-        if settings.shell_input_path:
-            path = Path(settings.shell_input_path)
-        elif settings.shell_input_dir:
-            path = newest_matching_file(settings.shell_input_dir, settings.shell_glob)
+        api_configured = all((
+            settings.shell_customer_code,
+            settings.shell_user_id,
+            settings.shell_password,
+            settings.shell_branch_code,
+        ))
 
-        if not path or not path.exists():
-            detail = 'Shell file not found'
-            _track_run_finish(db, run, 0, status='skipped', detail=detail)
-            return SourceSyncResult(source='shell_excel', rows_loaded=0, detail=detail)
+        if settings.shell_use_api and api_configured:
+            start_dt, end_dt = _build_source_window(db, 'shell_excel')
+            client = ShellTtsClient(
+                base_url=settings.shell_base_url,
+                customer_code=settings.shell_customer_code,
+                user_id=settings.shell_user_id,
+                password=settings.shell_password,
+                branch_code=settings.shell_branch_code,
+                timeout=settings.shell_timeout_seconds,
+            )
+            rows, process_result = client.get_customer_sales_transactions(start_dt=start_dt, end_dt=end_dt)
+            raw = shell_transactions_to_legacy_df(rows)
+            events = normalize_shell_df(raw)
+            rows_loaded = save_events(db, events)
+            detail = f'api GetCustomerSalesTransaction {start_dt.isoformat()} -> {end_dt.isoformat()}, received={len(rows)}'
+            if process_result:
+                detail += f', result={process_result}'
+            _track_run_finish(db, run, rows_loaded, detail=detail)
+            return SourceSyncResult(source='shell_excel', rows_loaded=rows_loaded, detail=detail)
 
-        raw = read_shell_excel(path)
-        events = normalize_shell_df(raw)
-        rows_loaded = save_events(db, events)
+        if settings.shell_file_fallback_enabled:
+            return _sync_shell_file_fallback(db, run)
 
-        detail = str(path)
-        _track_run_finish(db, run, rows_loaded, detail=detail)
-        return SourceSyncResult(source='shell_excel', rows_loaded=rows_loaded, detail=detail)
+        detail = 'Shell SOAP credentials are not configured'
+        _track_run_finish(db, run, 0, status='skipped', detail=detail)
+        return SourceSyncResult(source='shell_excel', rows_loaded=0, detail=detail)
 
+    except requests.exceptions.RequestException as exc:
+        db.rollback()
+        if settings.shell_file_fallback_enabled:
+            try:
+                return _sync_shell_file_fallback(db, run, api_error=str(exc))
+            except Exception as fallback_exc:
+                db.rollback()
+                detail = f'Shell API error: {exc}; fallback error: {fallback_exc}'
+                _track_run_finish(db, run, 0, status='error', detail=detail)
+                return SourceSyncResult(source='shell_excel', rows_loaded=0, detail=detail)
+        detail = f'Shell request error: {exc}'
+        _track_run_finish(db, run, 0, status='error', detail=detail)
+        return SourceSyncResult(source='shell_excel', rows_loaded=0, detail=detail)
     except Exception as exc:
         db.rollback()
+        if settings.shell_file_fallback_enabled:
+            try:
+                return _sync_shell_file_fallback(db, run, api_error=str(exc))
+            except Exception as fallback_exc:
+                db.rollback()
+                detail = f'Shell API error: {exc}; fallback error: {fallback_exc}'
+                _track_run_finish(db, run, 0, status='error', detail=detail)
+                return SourceSyncResult(source='shell_excel', rows_loaded=0, detail=detail)
         _track_run_finish(db, run, 0, status='error', detail=str(exc))
         return SourceSyncResult(source='shell_excel', rows_loaded=0, detail=f'error: {exc}')
 
