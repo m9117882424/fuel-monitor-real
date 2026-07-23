@@ -172,4 +172,8 @@ def shell_transactions_to_legacy_df(rows: list[dict[str, Any]]) -> pd.DataFrame:
                 break
         output[target] = source[selected] if selected is not None else ''
 
+    # Legacy normalizer always checks this optional fallback column and expects
+    # a pandas Series rather than a scalar string.
+    output['#Н/Д'] = ''
+
     return output
