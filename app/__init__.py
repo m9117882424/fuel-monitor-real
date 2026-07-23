@@ -15,9 +15,13 @@ class _ApiLoader(importlib.abc.Loader):
 
     def exec_module(self, module):
         self.wrapped_loader.exec_module(module)
+
         from .month_comments import install_month_comments
+        from .roster_upload import install_roster_upload
 
         install_month_comments(module.app)
+        install_roster_upload(module.app)
+
         try:
             sys.meta_path.remove(_api_finder)
         except ValueError:
