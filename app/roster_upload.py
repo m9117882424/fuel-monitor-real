@@ -74,6 +74,10 @@ _SCRIPT_HTML = r"""
 """.strip()
 
 
+SHELL_UPLOAD_INPUT_HTML = "<input id='shell-upload-input' type='file' accept='.xlsx,.xls,.csv' style='display:none'/>"
+SHELL_UPLOAD_BUTTON_HTML = "<button id='shell-upload-btn' type='button'>Загрузить файл Shell</button>"
+
+
 def _driver_input_dir() -> Path:
     configured = str(getattr(settings, "driver_input_dir", "") or "").strip()
     if not configured:
@@ -152,6 +156,10 @@ def install_roster_upload(app: FastAPI) -> None:
                 _BUTTON_HTML + "\n<input id='shell-upload-input'",
                 1,
             )
+
+        html = html.replace(SHELL_UPLOAD_INPUT_HTML, "", 1)
+        html = html.replace(SHELL_UPLOAD_BUTTON_HTML, "", 1)
+
         if "id='roster-upload-btn'" in html and "installRosterUpload" not in html:
             html = html.replace("</body>", _SCRIPT_HTML + "\n</body>", 1)
 
