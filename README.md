@@ -65,14 +65,16 @@ Fuel Providers / Internal Reports / Manual Uploads
 
 # Fuel Monitor Real
 
-Рабочий каркас под реальный кейс контроля лимитов топлива по машинам.
+Рабочая система контроля лимитов и анализа топлива по транспортным средствам.
 
 Что уже есть:
 - импорт Turpak API
-- импорт Shell Excel
+- автоматический импорт Shell через TTS SOAP `GetCustomerSalesTransaction`
+- аварийный fallback-импорт Shell из Excel/CSV
 - импорт Petrol live API
 - fallback-импорт Petrol из файлов
-- единое хранилище fuel_events
+- единое хранилище `fuel_events`
+- идемпотентная загрузка и дедупликация Shell-транзакций
 - месячная сводка по госномеру
 - лимиты по машине
 - alert-логика по порогам 80/90/100
@@ -82,16 +84,56 @@ Fuel Providers / Internal Reports / Manual Uploads
 ## Архитектура
 
 Источники:
-- Turpak -> нормализация -> fuel_events
-- Shell Excel -> нормализация -> fuel_events
-- Petrol API -> нормализация -> fuel_events
-- Petrol export -> fallback -> fuel_events
+- Turpak API -> нормализация -> `fuel_events`
+- Shell TTS SOAP API -> нормализация -> `fuel_events`
+- Shell Excel/CSV -> аварийный fallback -> `fuel_events`
+- Petrol API -> нормализация -> `fuel_events`
+- Petrol export -> fallback -> `fuel_events`
 
 Сервисы:
-- sync_all()
-- build_monthly_vehicle_summary()
-- dispatch_alerts()
-- export_report()
+- `sync_all()`
+- `build_monthly_vehicle_summary()`
+- `dispatch_alerts()`
+- `export_report()`
+
+## Shell TTS SOAP
+
+Основной источник Shell — метод `GetCustomerSalesTransaction` старого TTS WebService.
+
+Синхронизация:
+- при отсутствии данных за текущий месяц загружает период с начала месяца;
+- при регулярных запусках повторно проверяет последние `REGULAR_SYNC_DAYS_BACK` дней;
+- повторные операции не добавляются в базу;
+- ручные Excel-файлы можно оставить как аварийный fallback или полностью отключить.
+
+Минимальная конфигурация `.env`:
+
+```env
+SHELL_ENABLED=true
+SHELL_USE_API=true
+SHELL_BASE_URL=https://tts.turkiyeshell.com/TTS/TTSWebServices.asmx
+SHELL_CUSTOMER_CODE=<customer_code>
+SHELL_USER_ID=<web_service_user>
+SHELL_PASSWORD=<password>
+SHELL_BRANCH_CODE=<branch_code>
+SHELL_TIMEOUT_SECONDS=120
+SHELL_FILE_FALLBACK_ENABLED=false
+```
+
+Проверка синхронизации:
+
+```bash
+source .venv/bin/activate
+python cli_sync.py
+```
+
+Успешный вызов Shell отображается в результате примерно так:
+
+```text
+SourceSyncResult(source='shell_excel', rows_loaded=0, detail='api GetCustomerSalesTransaction ... received=12')
+```
+
+`received` — количество строк, полученных от Shell. `rows_loaded` — количество новых строк, фактически добавленных после дедупликации.
 
 ## API
 
