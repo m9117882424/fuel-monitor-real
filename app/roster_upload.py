@@ -64,26 +64,10 @@ _SCRIPT_HTML = r"""
     });
   }
 
-  function loadDashboardOnOpen() {
-    if (!document.getElementById('vehicle-table')) return;
-    if (window.__leadershipDashboardInitialLoadStarted) return;
-    if (typeof reloadDashboard !== 'function') return;
-
-    window.__leadershipDashboardInitialLoadStarted = true;
-    window.setTimeout(function () {
-      reloadDashboard(false);
-    }, 0);
-  }
-
-  function initializePage() {
-    installRosterUpload();
-    loadDashboardOnOpen();
-  }
-
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', initializePage);
+    document.addEventListener('DOMContentLoaded', installRosterUpload);
   } else {
-    initializePage();
+    installRosterUpload();
   }
 })();
 </script>
@@ -92,6 +76,10 @@ _SCRIPT_HTML = r"""
 
 SHELL_UPLOAD_INPUT_HTML = "<input id='shell-upload-input' type='file' accept='.xlsx,.xls,.csv' style='display:none'/>"
 SHELL_UPLOAD_BUTTON_HTML = "<button id='shell-upload-btn' type='button'>Загрузить файл Shell</button>"
+HIDDEN_SHELL_UPLOAD_BUTTON_HTML = (
+    "<button id='shell-upload-btn' type='button' style='display:none' aria-hidden='true' tabindex='-1'>"
+    "Загрузить файл Shell</button>"
+)
 
 
 def _driver_input_dir() -> Path:
@@ -173,10 +161,12 @@ def install_roster_upload(app: FastAPI) -> None:
                 1,
             )
 
-        html = html.replace(SHELL_UPLOAD_INPUT_HTML, "", 1)
-        html = html.replace(SHELL_UPLOAD_BUTTON_HTML, "", 1)
+        # Keep the original hidden Shell controls in the DOM because the dashboard
+        # JavaScript binds to them before it installs search and filter handlers.
+        # Only hide the visible button instead of deleting the elements entirely.
+        html = html.replace(SHELL_UPLOAD_BUTTON_HTML, HIDDEN_SHELL_UPLOAD_BUTTON_HTML, 1)
 
-        if "id='roster-upload-btn'" in html and "loadDashboardOnOpen" not in html:
+        if "id='roster-upload-btn'" in html and "installRosterUpload" not in html:
             html = html.replace("</body>", _SCRIPT_HTML + "\n</body>", 1)
 
         headers = dict(response.headers)
