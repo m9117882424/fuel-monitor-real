@@ -64,10 +64,26 @@ _SCRIPT_HTML = r"""
     });
   }
 
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', installRosterUpload);
-  } else {
+  function loadDashboardOnOpen() {
+    if (!document.getElementById('vehicle-table')) return;
+    if (window.__leadershipDashboardInitialLoadStarted) return;
+    if (typeof reloadDashboard !== 'function') return;
+
+    window.__leadershipDashboardInitialLoadStarted = true;
+    window.setTimeout(function () {
+      reloadDashboard(false);
+    }, 0);
+  }
+
+  function initializePage() {
     installRosterUpload();
+    loadDashboardOnOpen();
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initializePage);
+  } else {
+    initializePage();
   }
 })();
 </script>
@@ -160,7 +176,7 @@ def install_roster_upload(app: FastAPI) -> None:
         html = html.replace(SHELL_UPLOAD_INPUT_HTML, "", 1)
         html = html.replace(SHELL_UPLOAD_BUTTON_HTML, "", 1)
 
-        if "id='roster-upload-btn'" in html and "installRosterUpload" not in html:
+        if "id='roster-upload-btn'" in html and "loadDashboardOnOpen" not in html:
             html = html.replace("</body>", _SCRIPT_HTML + "\n</body>", 1)
 
         headers = dict(response.headers)
