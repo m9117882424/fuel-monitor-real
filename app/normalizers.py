@@ -10,6 +10,7 @@ from .utils import COMMON_EVENT_COLUMNS, normalize_card_no, normalize_fuel_type,
 def _empty() -> pd.DataFrame:
     return pd.DataFrame(columns=COMMON_EVENT_COLUMNS)
 
+
 def _series(df: pd.DataFrame, key: str, default: Any = '') -> pd.Series:
     value = df.get(key)
     if isinstance(value, pd.Series):
@@ -22,39 +23,42 @@ def normalize_shell_df(df: pd.DataFrame) -> pd.DataFrame:
         return _empty()
 
     fallback_plate = (
-        df.get('#Н/Д', '')
+        _series(df, '#Н/Д')
         .fillna('')
         .astype(str)
         .str.strip()
         .replace({'Нет данных': '', '0': '', '#Н/Д': ''})
     )
-    main_plate = df.get('Номерной знак', '').fillna('').astype(str).str.strip()
+    main_plate = _series(df, 'Номерной знак').fillna('').astype(str).str.strip()
     resolved_plate = main_plate.where(main_plate != '', fallback_plate)
 
     detail = pd.DataFrame({
-        'event_dt': pd.to_datetime(df.get('Date'), errors='coerce'),
+        'event_dt': pd.to_datetime(_series(df, 'Date'), errors='coerce'),
         'plate': resolved_plate.apply(normalize_plate),
-        'fuel_type_raw': df.get('Вид топлива', '').fillna('').astype(str).str.strip(),
-        'liters': df.get('Общий литр (л)', 0).apply(parse_float),
-        'unit_price_try': df.get('Цена (тл)', 0).apply(parse_float),
-        'amount_try': df.get('Стоимость (тл)', 0).apply(parse_float),
+        'fuel_type_raw': _series(df, 'Вид топлива').fillna('').astype(str).str.strip(),
+        'liters': _series(df, 'Общий литр (л)', 0).apply(parse_float),
+        'unit_price_try': _series(df, 'Цена (тл)', 0).apply(parse_float),
+        'amount_try': _series(df, 'Стоимость (тл)', 0).apply(parse_float),
         'discount_try': 0.0,
-        'station_code': df.get('Код станции', '').fillna('').astype(str).str.strip(),
-        'station_name': df.get('Название станции', '').fillna('').astype(str).str.strip(),
-        'station_city': df.get('Провинция', '').fillna('').astype(str).str.strip(),
-        'receipt_no': '',
-        'card_no': df.get('Номер карты', '').apply(normalize_card_no),
+        'station_code': _series(df, 'Код станции').fillna('').astype(str).str.strip(),
+        'station_name': _series(df, 'Название станции').fillna('').astype(str).str.strip(),
+        'station_city': _series(df, 'Провинция').fillna('').astype(str).str.strip(),
+        'receipt_no': _series(df, 'Номер счета').fillna('').astype(str).str.strip(),
+        'card_no': _series(df, 'Номер карты').apply(normalize_card_no),
         'card_type': '',
-        'group_name': df.get('Название группы', '').fillna('').astype(str).str.strip(),
-        'odometer': df.get('Километраж', 0).apply(parse_float),
-        'sale_type': df.get('Satış Tipi', '').fillna('').astype(str).str.strip(),
-        'department_code': df.get('Departman Kodu', '').fillna('').astype(str).str.strip(),
+        'group_name': _series(df, 'Название группы').fillna('').astype(str).str.strip(),
+        'odometer': _series(df, 'Километраж', 0).apply(parse_float),
+        'sale_type': _series(df, 'Satış Tipi').fillna('').astype(str).str.strip(),
+        'department_code': _series(df, 'Departman Kodu').fillna('').astype(str).str.strip(),
     })
     detail['source'] = 'shell_excel'
-    detail['external_id'] = ''
+    detail['external_id'] = _series(df, 'External ID').fillna('').astype(str).str.strip()
     detail['fuel_type_norm'] = detail['fuel_type_raw'].apply(normalize_fuel_type)
     detail['year_month'] = detail['event_dt'].dt.strftime('%Y-%m')
     detail['event_dt_str'] = detail['event_dt'].dt.strftime('%Y-%m-%d %H:%M:%S')
+
+    # Keep the historical hash format so API rows match earlier Excel imports.
+    # RID is stored in external_id for diagnostics and future migrations.
     detail['event_key'] = detail.apply(
         lambda row: sha256_key('shell', [
             row['event_dt_str'], row['plate'], row['fuel_type_raw'], row['liters'], row['amount_try'], row['station_name'], row['card_no']
