@@ -9,6 +9,7 @@ from ..models import FuelEvent, VehicleLimit
 from ..utils import current_year_month, normalize_plate
 
 STATUS_ORDER = {'OK': 0, 'WARNING': 1, 'CRITICAL': 2, 'EXCEEDED': 3, 'UNLIMITED': 4}
+PASSENGER_GROUP = '#TSM BINEK ARAC'
 
 
 def _status_from_pct(pct: float | None) -> str:
@@ -55,11 +56,27 @@ def _safe_float(value, default: float = 0.0) -> float:
         return default
 
 
+def _passenger_plate_subquery(db: Session, ym: str):
+    normalized_group = func.upper(func.trim(func.replace(FuelEvent.group_name, '_', ' ')))
+    return (
+        db.query(FuelEvent.plate)
+        .filter(
+            FuelEvent.year_month == ym,
+            normalized_group == PASSENGER_GROUP,
+        )
+        .distinct()
+        .subquery()
+    )
+
+
 def _fetch_monthly_aggregates(db: Session, ym: str) -> pd.DataFrame:
     """
-    Aggregate fuel events in SQL instead of loading all monthly rows into Python.
-    The dashboard needs per-vehicle totals, not every transaction payload.
+    Aggregate only vehicles belonging to Turpak group #TSM_BINEK_ARAC.
+    For those plates, totals still include Turpak, Shell and Petrol operations.
+    This affects Fuel Monitor only and does not change Metabase data sources.
     """
+    passenger_plates = _passenger_plate_subquery(db, ym)
+
     rows = (
         db.query(
             FuelEvent.plate.label('plate'),
@@ -71,7 +88,10 @@ def _fetch_monthly_aggregates(db: Session, ym: str) -> pd.DataFrame:
             func.sum(FuelEvent.liters).label('total_liters'),
             func.sum(FuelEvent.amount_try).label('total_amount_try'),
         )
-        .filter(FuelEvent.year_month == ym)
+        .filter(
+            FuelEvent.year_month == ym,
+            FuelEvent.plate.in_(passenger_plates),
+        )
         .group_by(FuelEvent.plate)
         .all()
     )
@@ -81,7 +101,10 @@ def _fetch_monthly_aggregates(db: Session, ym: str) -> pd.DataFrame:
 
     source_rows = (
         db.query(FuelEvent.plate, FuelEvent.source)
-        .filter(FuelEvent.year_month == ym)
+        .filter(
+            FuelEvent.year_month == ym,
+            FuelEvent.plate.in_(passenger_plates),
+        )
         .distinct()
         .all()
     )
