@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import pandas as pd
-from sqlalchemy import case, func
+from sqlalchemy import case, func, or_
 from sqlalchemy.orm import Session
 
 from ..config import settings
@@ -9,7 +9,7 @@ from ..models import FuelEvent, VehicleLimit
 from ..utils import current_year_month, normalize_plate
 
 STATUS_ORDER = {'OK': 0, 'WARNING': 1, 'CRITICAL': 2, 'EXCEEDED': 3, 'UNLIMITED': 4}
-PASSENGER_GROUP = '#TSM BINEK ARAC'
+TURPAK_PASSENGER_GROUP = '#TSM_BINEK_ARAC'
 
 
 def _status_from_pct(pct: float | None) -> str:
@@ -56,27 +56,29 @@ def _safe_float(value, default: float = 0.0) -> float:
         return default
 
 
-def _passenger_plate_subquery(db: Session, ym: str):
-    normalized_group = func.upper(func.trim(func.replace(FuelEvent.group_name, '_', ' ')))
-    return (
-        db.query(FuelEvent.plate)
-        .filter(
-            FuelEvent.year_month == ym,
-            normalized_group == PASSENGER_GROUP,
-        )
-        .distinct()
-        .subquery()
+def _web_source_scope():
+    """
+    Fuel Monitor web scope:
+    - Turpak: only passenger group #TSM_BINEK_ARAC;
+    - Shell and Petrol: all rows, because these sources already contain only passenger vehicles.
+
+    This filter applies only to Fuel Monitor queries against fuel_events and does not affect
+    turpak_fuel_events_all or fuel_three_sources_v used by Metabase.
+    """
+    normalized_group = func.upper(
+        func.replace(func.trim(func.coalesce(FuelEvent.group_name, '')), ' ', '_')
+    )
+    return or_(
+        FuelEvent.source != 'turpak',
+        normalized_group == TURPAK_PASSENGER_GROUP,
     )
 
 
 def _fetch_monthly_aggregates(db: Session, ym: str) -> pd.DataFrame:
     """
-    Aggregate only vehicles belonging to Turpak group #TSM_BINEK_ARAC.
-    For those plates, totals still include Turpak, Shell and Petrol operations.
-    This affects Fuel Monitor only and does not change Metabase data sources.
+    Aggregate fuel events in SQL instead of loading all monthly rows into Python.
+    The dashboard needs per-vehicle totals, not every transaction payload.
     """
-    passenger_plates = _passenger_plate_subquery(db, ym)
-
     rows = (
         db.query(
             FuelEvent.plate.label('plate'),
@@ -88,10 +90,8 @@ def _fetch_monthly_aggregates(db: Session, ym: str) -> pd.DataFrame:
             func.sum(FuelEvent.liters).label('total_liters'),
             func.sum(FuelEvent.amount_try).label('total_amount_try'),
         )
-        .filter(
-            FuelEvent.year_month == ym,
-            FuelEvent.plate.in_(passenger_plates),
-        )
+        .filter(FuelEvent.year_month == ym)
+        .filter(_web_source_scope())
         .group_by(FuelEvent.plate)
         .all()
     )
@@ -101,10 +101,8 @@ def _fetch_monthly_aggregates(db: Session, ym: str) -> pd.DataFrame:
 
     source_rows = (
         db.query(FuelEvent.plate, FuelEvent.source)
-        .filter(
-            FuelEvent.year_month == ym,
-            FuelEvent.plate.in_(passenger_plates),
-        )
+        .filter(FuelEvent.year_month == ym)
+        .filter(_web_source_scope())
         .distinct()
         .all()
     )
@@ -221,7 +219,7 @@ def build_monthly_vehicle_summary(db: Session, year_month: str | None = None) ->
 
 def fetch_events(db: Session, year_month: str | None = None, plate: str | None = None, limit: int = 500) -> pd.DataFrame:
     ym = year_month or current_year_month()
-    q = db.query(FuelEvent).filter(FuelEvent.year_month == ym)
+    q = db.query(FuelEvent).filter(FuelEvent.year_month == ym).filter(_web_source_scope())
     if plate:
         q = q.filter(FuelEvent.plate == normalize_plate(plate))
 
