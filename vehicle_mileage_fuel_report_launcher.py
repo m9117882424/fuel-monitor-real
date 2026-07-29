@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
-"""Запуск отчёта с безопасными параметрами чанков для больших групп Arvento."""
+"""Запуск отчёта с безопасными параметрами Arvento и адаптивным чтением топлива."""
 from __future__ import annotations
 
 import sys
+
+import vehicle_mileage_fuel_report as core
+from vehicle_mileage_fuel_db import get_fuel as adaptive_get_fuel
+
+# Основной отчёт вызывает core.get_fuel. Подменяем его адаптивной реализацией,
+# которая читает фактические колонки представлений и таблиц текущей БД.
+core.get_fuel = adaptive_get_fuel
 
 from vehicle_mileage_fuel_report_group import main
 
