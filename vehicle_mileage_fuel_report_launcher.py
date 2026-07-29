@@ -5,11 +5,16 @@ from __future__ import annotations
 import sys
 
 import vehicle_mileage_fuel_report as core
-from vehicle_mileage_fuel_db import get_fuel as adaptive_get_fuel
+import vehicle_mileage_fuel_db as adaptive_db
+
+# В текущем fuel_three_sources_v источник называется source_system.
+# Добавляем алиас до первого чтения представления.
+if "source_system" not in adaptive_db.COLUMN_ALIASES["source"]:
+    adaptive_db.COLUMN_ALIASES["source"] += ("source_system",)
 
 # Основной отчёт вызывает core.get_fuel. Подменяем его адаптивной реализацией,
 # которая читает фактические колонки представлений и таблиц текущей БД.
-core.get_fuel = adaptive_get_fuel
+core.get_fuel = adaptive_db.get_fuel
 
 from vehicle_mileage_fuel_report_group import main
 
