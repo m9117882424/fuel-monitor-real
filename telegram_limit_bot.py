@@ -23,14 +23,20 @@ def _env(name: str, default: str = '') -> str:
 
 
 def _bot_token() -> str:
-    token = str(getattr(settings, 'telegram_bot_token', '') or _env('TELEGRAM_BOT_TOKEN')).strip()
+    # Dedicated token for the /limit bot has priority so it does not conflict
+    # with the main Telegram bot that may already use getUpdates/webhook.
+    token = (
+        _env('TELEGRAM_LIMIT_BOT_TOKEN')
+        or _env('TELEGRAM_BOT_TOKEN')
+        or str(getattr(settings, 'telegram_bot_token', '') or '').strip()
+    )
     if not token:
-        raise SystemExit('[STOP] TELEGRAM_BOT_TOKEN / telegram_bot_token is not configured')
+        raise SystemExit('[STOP] TELEGRAM_LIMIT_BOT_TOKEN / TELEGRAM_BOT_TOKEN is not configured')
     return token
 
 
 def _allowed_chat_ids() -> set[str]:
-    raw = _env('TELEGRAM_ALLOWED_CHAT_IDS')
+    raw = _env('TELEGRAM_LIMIT_ALLOWED_CHAT_IDS') or _env('TELEGRAM_ALLOWED_CHAT_IDS')
     if not raw:
         raw = str(getattr(settings, 'telegram_chat_id', '') or '')
     return {item.strip() for item in raw.replace(';', ',').split(',') if item.strip()}
@@ -191,6 +197,7 @@ def main() -> int:
     allowed = _allowed_chat_ids()
     print('[START] Telegram /limit bot', flush=True)
     print('[INFO] token exists:', bool(token), flush=True)
+    print('[INFO] dedicated token:', bool(_env('TELEGRAM_LIMIT_BOT_TOKEN')), flush=True)
     print('[INFO] allowed_chat_ids:', sorted(allowed) if allowed else 'ALL (not recommended)', flush=True)
 
     offset = _read_offset()
