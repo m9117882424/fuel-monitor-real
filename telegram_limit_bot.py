@@ -8,6 +8,11 @@ from pathlib import Path
 from typing import Any
 
 import requests
+from dotenv import load_dotenv
+
+# Manual runs do not get systemd EnvironmentFile variables.
+# Load .env before reading TELEGRAM_LIMIT_* from os.environ.
+load_dotenv('.env')
 
 from app.config import settings
 from app.db import SessionLocal
