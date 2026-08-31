@@ -1,0 +1,16 @@
+[Unit]
+Description=Fuel Monitor Telegram /limit Bot
+After=network-online.target fuel-monitor-api.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/fuel_monitor_real
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/root/fuel_monitor_real/.env
+ExecStart=/root/fuel_monitor_real/.venv/bin/python /root/fuel_monitor_real/telegram_limit_bot.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
