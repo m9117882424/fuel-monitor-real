@@ -21,6 +21,9 @@ from app.utils import current_year_month, normalize_plate
 
 
 BOT_API_BASE = 'https://api.telegram.org/bot'
+CHECK_LIMIT_BUTTON = '⛽ Проверить лимит'
+HELP_BUTTON = 'ℹ️ Помощь'
+AWAITING_LIMIT_PLATE: set[str] = set()
 
 
 def _env(name: str, default: str = '') -> str:
@@ -78,7 +81,26 @@ def _write_offset(offset: int) -> None:
     path.write_text(str(offset), encoding='utf-8')
 
 
-def _send_message(chat_id: int | str, text: str, *, reply_to_message_id: int | None = None) -> bool:
+def _main_keyboard() -> dict[str, Any]:
+    return {
+        'keyboard': [
+            [{'text': CHECK_LIMIT_BUTTON}],
+            [{'text': HELP_BUTTON}],
+        ],
+        'resize_keyboard': True,
+        'one_time_keyboard': False,
+        'is_persistent': True,
+        'input_field_placeholder': 'Нажмите кнопку или введите госномер',
+    }
+
+
+def _send_message(
+    chat_id: int | str,
+    text: str,
+    *,
+    reply_to_message_id: int | None = None,
+    with_keyboard: bool = True,
+) -> bool:
     payload: dict[str, Any] = {
         'chat_id': chat_id,
         'text': text,
@@ -87,6 +109,8 @@ def _send_message(chat_id: int | str, text: str, *, reply_to_message_id: int | N
     }
     if reply_to_message_id is not None:
         payload['reply_to_message_id'] = reply_to_message_id
+    if with_keyboard:
+        payload['reply_markup'] = _main_keyboard()
 
     response = requests.post(_api_url('sendMessage'), json=payload, timeout=30)
     if not response.ok:
@@ -147,11 +171,45 @@ def _parse_limit_command(text: str) -> tuple[str | None, str | None, bool]:
     return plate, year_month, False
 
 
+def _parse_plate_input(text: str) -> tuple[str | None, str | None]:
+    """Parse plain input after pressing the keyboard button.
+
+    Supported:
+      34ABC123
+      34ABC123 2026-08
+    """
+    parts = text.strip().split()
+    plate = None
+    year_month = None
+
+    for arg in parts:
+        if re.fullmatch(r'\d{4}-\d{2}', arg):
+            year_month = arg
+        elif arg.strip():
+            plate = normalize_plate(arg)
+
+    return plate, year_month
+
+
 def _help_text() -> str:
     return (
         'Команда лимита по машине:\n\n'
-        '<code>/limit 34ABC123</code> — лимит, перерасход, остаток, заправки Shell/Petrol/Turpak, водитель и подразделение за текущий месяц\n'
-        '<code>/limit 34ABC123 2026-08</code> — то же за выбранный месяц'
+        f'Нажмите кнопку <b>{html_escape(CHECK_LIMIT_BUTTON)}</b> и отправьте госномер.\n\n'
+        '<code>34ABC123</code> — лимит за текущий месяц\n'
+        '<code>34ABC123 2026-08</code> — лимит за выбранный месяц\n\n'
+        'Также работает старый формат:\n'
+        '<code>/limit 34ABC123</code>\n'
+        '<code>/limit 34ABC123 2026-08</code>'
+    )
+
+
+def html_escape(value: Any) -> str:
+    return (
+        str(value)
+        .replace('&', '&amp;')
+        .replace('<', '&lt;')
+        .replace('>', '&gt;')
+        .replace('"', '&quot;')
     )
 
 
@@ -174,12 +232,17 @@ def _sender_label(message: dict[str, Any]) -> str:
     )
 
 
-def _log_limit_request(message: dict[str, Any], text: str, allowed: bool) -> None:
-    plate, year_month, help_requested = _parse_limit_command(text)
+def _log_limit_request(message: dict[str, Any], text: str, allowed: bool, *, source: str = 'command') -> None:
+    if source == 'plain_plate':
+        plate, year_month = _parse_plate_input(text)
+        help_requested = False
+    else:
+        plate, year_month, help_requested = _parse_limit_command(text)
     requested_period = year_month or current_year_month()
     print(
         '[AUDIT] /limit request '
         f'allowed={allowed} '
+        f'source={source} '
         f'plate={plate or "-"} '
         f'year_month={requested_period} '
         f'help={help_requested} '
@@ -188,12 +251,7 @@ def _log_limit_request(message: dict[str, Any], text: str, allowed: bool) -> Non
     )
 
 
-def _handle_limit(chat_id: int, message_id: int | None, text: str) -> None:
-    plate, year_month, help_requested = _parse_limit_command(text)
-    if help_requested or not plate:
-        _send_message(chat_id, _help_text(), reply_to_message_id=message_id)
-        return
-
+def _send_limit_result(chat_id: int, message_id: int | None, plate: str, year_month: str | None) -> None:
     db = SessionLocal()
     try:
         response_text = build_vehicle_limit_message(
@@ -207,6 +265,19 @@ def _handle_limit(chat_id: int, message_id: int | None, text: str) -> None:
     _send_message(chat_id, response_text, reply_to_message_id=message_id)
 
 
+def _handle_limit(chat_id: int, message_id: int | None, text: str) -> None:
+    plate, year_month, help_requested = _parse_limit_command(text)
+    if help_requested or not plate:
+        _send_message(chat_id, _help_text(), reply_to_message_id=message_id)
+        return
+
+    _send_limit_result(chat_id, message_id, plate, year_month)
+
+
+def _is_allowed(chat_id: Any, allowed_chat_ids: set[str]) -> bool:
+    return chat_id is not None and (not allowed_chat_ids or str(chat_id) in allowed_chat_ids)
+
+
 def _handle_update(update: dict[str, Any], allowed_chat_ids: set[str]) -> None:
     message = update.get('message') or {}
     text = str(message.get('text') or '').strip()
@@ -217,27 +288,59 @@ def _handle_update(update: dict[str, Any], allowed_chat_ids: set[str]) -> None:
     chat_id = message.get('chat', {}).get('id')
     message_id = message.get('message_id')
 
-    if not text_normalized.lower().startswith('/limit'):
-        if text_normalized.lower() in {'/start', '/help'} and chat_id is not None:
-            _send_message(chat_id, _help_text(), reply_to_message_id=message_id)
-        return
-
     if chat_id is None:
         return
 
-    allowed = not allowed_chat_ids or str(chat_id) in allowed_chat_ids
-    _log_limit_request(message, text, allowed)
+    allowed = _is_allowed(chat_id, allowed_chat_ids)
 
-    if not allowed:
-        print(f'[WARN] Unauthorized chat_id={chat_id}', flush=True)
-        _send_message(chat_id, 'Доступ к команде /limit не разрешён.', reply_to_message_id=message_id)
+    if text_normalized.lower() in {'/start', '/help', HELP_BUTTON.lower()}:
+        _send_message(chat_id, _help_text(), reply_to_message_id=message_id)
         return
 
-    try:
-        _handle_limit(int(chat_id), message_id, text)
-    except Exception as exc:
-        print('[ERROR] /limit failed:', repr(exc), flush=True)
-        _send_message(chat_id, f'Ошибка при расчёте лимита: {exc}', reply_to_message_id=message_id)
+    if text_normalized == CHECK_LIMIT_BUTTON:
+        if not allowed:
+            print(f'[WARN] Unauthorized chat_id={chat_id}', flush=True)
+            _send_message(chat_id, 'Доступ к команде /limit не разрешён.', reply_to_message_id=message_id)
+            return
+        AWAITING_LIMIT_PLATE.add(str(chat_id))
+        _send_message(
+            chat_id,
+            'Введите госномер. Например: <code>34FRL826</code>\n'
+            'Можно указать месяц: <code>34FRL826 2026-08</code>',
+            reply_to_message_id=message_id,
+        )
+        return
+
+    if text_normalized.lower().startswith('/limit'):
+        _log_limit_request(message, text, allowed, source='command')
+        if not allowed:
+            print(f'[WARN] Unauthorized chat_id={chat_id}', flush=True)
+            _send_message(chat_id, 'Доступ к команде /limit не разрешён.', reply_to_message_id=message_id)
+            return
+        try:
+            _handle_limit(int(chat_id), message_id, text)
+        except Exception as exc:
+            print('[ERROR] /limit failed:', repr(exc), flush=True)
+            _send_message(chat_id, f'Ошибка при расчёте лимита: {exc}', reply_to_message_id=message_id)
+        return
+
+    if str(chat_id) in AWAITING_LIMIT_PLATE:
+        plate, year_month = _parse_plate_input(text)
+        _log_limit_request(message, text, allowed, source='plain_plate')
+        if not allowed:
+            print(f'[WARN] Unauthorized chat_id={chat_id}', flush=True)
+            _send_message(chat_id, 'Доступ к команде /limit не разрешён.', reply_to_message_id=message_id)
+            return
+        if not plate:
+            _send_message(chat_id, 'Не понял госномер. Пример: <code>34FRL826</code>', reply_to_message_id=message_id)
+            return
+        AWAITING_LIMIT_PLATE.discard(str(chat_id))
+        try:
+            _send_limit_result(int(chat_id), message_id, plate, year_month)
+        except Exception as exc:
+            print('[ERROR] /limit failed:', repr(exc), flush=True)
+            _send_message(chat_id, f'Ошибка при расчёте лимита: {exc}', reply_to_message_id=message_id)
+        return
 
 
 def main() -> int:
