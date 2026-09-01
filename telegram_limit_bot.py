@@ -118,6 +118,13 @@ def _send_message(
     return response.ok
 
 
+def _send_chat_action(chat_id: int | str, action: str = 'typing') -> None:
+    try:
+        requests.post(_api_url('sendChatAction'), json={'chat_id': chat_id, 'action': action}, timeout=10)
+    except Exception as exc:
+        print('[WARN] sendChatAction failed:', repr(exc), flush=True)
+
+
 def _get_updates(offset: int | None) -> list[dict[str, Any]]:
     params: dict[str, Any] = {
         'timeout': 30,
@@ -138,6 +145,24 @@ def _command_without_mention(text: str) -> str:
     return re.sub(r'^/([a-zA-Z0-9_]+)@[A-Za-z0-9_]+', r'/\1', text.strip())
 
 
+def _extract_plate_and_period(args: list[str]) -> tuple[str | None, str | None]:
+    plate_parts: list[str] = []
+    year_month = None
+
+    for arg in args:
+        arg = arg.strip()
+        if not arg:
+            continue
+        if re.fullmatch(r'\d{4}-\d{2}', arg):
+            year_month = arg
+        else:
+            plate_parts.append(arg)
+
+    plate_raw = ''.join(plate_parts)
+    plate = normalize_plate(plate_raw) if plate_raw else None
+    return plate or None, year_month
+
+
 def _parse_limit_command(text: str) -> tuple[str | None, str | None, bool]:
     """
     Returns: plate, year_month, help_requested.
@@ -145,6 +170,7 @@ def _parse_limit_command(text: str) -> tuple[str | None, str | None, bool]:
     Supported:
       /limit 34ABC123
       /limit 34ABC123 2026-08
+      /limit 34 ABC 123 2026-08
       /limit help
     """
     text = _command_without_mention(text)
@@ -159,36 +185,48 @@ def _parse_limit_command(text: str) -> tuple[str | None, str | None, bool]:
     if parts[1].lower() in {'help', '?', 'помощь'}:
         return None, None, True
 
-    plate = None
-    year_month = None
-
-    for arg in parts[1:]:
-        if re.fullmatch(r'\d{4}-\d{2}', arg):
-            year_month = arg
-        elif arg.strip():
-            plate = normalize_plate(arg)
-
+    plate, year_month = _extract_plate_and_period(parts[1:])
     return plate, year_month, False
 
 
 def _parse_plate_input(text: str) -> tuple[str | None, str | None]:
-    """Parse plain input after pressing the keyboard button.
+    """Parse plain input after pressing the keyboard button or direct plate input.
 
     Supported:
       34ABC123
       34ABC123 2026-08
+      34 ABC 123 2026-08
     """
-    parts = text.strip().split()
-    plate = None
-    year_month = None
+    return _extract_plate_and_period(text.strip().split())
 
-    for arg in parts:
-        if re.fullmatch(r'\d{4}-\d{2}', arg):
-            year_month = arg
-        elif arg.strip():
-            plate = normalize_plate(arg)
 
-    return plate, year_month
+def _looks_like_plate_request(text: str) -> bool:
+    if not text or text.startswith('/'):
+        return False
+    if text in {CHECK_LIMIT_BUTTON, HELP_BUTTON}:
+        return False
+
+    plate, year_month = _parse_plate_input(text)
+    if not plate:
+        return False
+
+    # Turkish/Russian vehicle plates normally contain both digits and letters.
+    # Keep the rule broad enough for normalized fleet plates, but do not treat ordinary text as a plate.
+    has_digit = any(ch.isdigit() for ch in plate)
+    has_letter = any(ch.isalpha() for ch in plate)
+    length_ok = 5 <= len(plate) <= 16
+    period_ok = year_month is None or bool(re.fullmatch(r'\d{4}-\d{2}', year_month))
+    return has_digit and has_letter and length_ok and period_ok
+
+
+def html_escape(value: Any) -> str:
+    return (
+        str(value)
+        .replace('&', '&amp;')
+        .replace('<', '&lt;')
+        .replace('>', '&gt;')
+        .replace('"', '&quot;')
+    )
 
 
 def _help_text() -> str:
@@ -200,16 +238,6 @@ def _help_text() -> str:
         'Также работает старый формат:\n'
         '<code>/limit 34ABC123</code>\n'
         '<code>/limit 34ABC123 2026-08</code>'
-    )
-
-
-def html_escape(value: Any) -> str:
-    return (
-        str(value)
-        .replace('&', '&amp;')
-        .replace('<', '&lt;')
-        .replace('>', '&gt;')
-        .replace('"', '&quot;')
     )
 
 
@@ -233,7 +261,7 @@ def _sender_label(message: dict[str, Any]) -> str:
 
 
 def _log_limit_request(message: dict[str, Any], text: str, allowed: bool, *, source: str = 'command') -> None:
-    if source == 'plain_plate':
+    if source in {'plain_plate', 'direct_plate'}:
         plate, year_month = _parse_plate_input(text)
         help_requested = False
     else:
@@ -252,6 +280,7 @@ def _log_limit_request(message: dict[str, Any], text: str, allowed: bool, *, sou
 
 
 def _send_limit_result(chat_id: int, message_id: int | None, plate: str, year_month: str | None) -> None:
+    _send_chat_action(chat_id)
     db = SessionLocal()
     try:
         response_text = build_vehicle_limit_message(
@@ -324,9 +353,11 @@ def _handle_update(update: dict[str, Any], allowed_chat_ids: set[str]) -> None:
             _send_message(chat_id, f'Ошибка при расчёте лимита: {exc}', reply_to_message_id=message_id)
         return
 
-    if str(chat_id) in AWAITING_LIMIT_PLATE:
-        plate, year_month = _parse_plate_input(text)
-        _log_limit_request(message, text, allowed, source='plain_plate')
+    awaiting = str(chat_id) in AWAITING_LIMIT_PLATE
+    if awaiting or _looks_like_plate_request(text_normalized):
+        plate, year_month = _parse_plate_input(text_normalized)
+        source = 'plain_plate' if awaiting else 'direct_plate'
+        _log_limit_request(message, text_normalized, allowed, source=source)
         if not allowed:
             print(f'[WARN] Unauthorized chat_id={chat_id}', flush=True)
             _send_message(chat_id, 'Доступ к команде /limit не разрешён.', reply_to_message_id=message_id)
