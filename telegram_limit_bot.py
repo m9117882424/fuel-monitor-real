@@ -16,6 +16,7 @@ load_dotenv('.env')
 
 from app.config import settings
 from app.db import SessionLocal
+from app.services.driver_registry_service import load_driver_registry
 from app.services.telegram_limit_service import build_vehicle_limit_message
 from app.utils import current_year_month, normalize_plate
 
@@ -123,6 +124,19 @@ def _send_chat_action(chat_id: int | str, action: str = 'typing') -> None:
         requests.post(_api_url('sendChatAction'), json={'chat_id': chat_id, 'action': action}, timeout=10)
     except Exception as exc:
         print('[WARN] sendChatAction failed:', repr(exc), flush=True)
+
+
+def _warm_caches() -> None:
+    """Warm expensive read-through caches before the first user request."""
+    started = time.perf_counter()
+    try:
+        registry = load_driver_registry()
+        rows = 0 if registry is None else len(registry)
+        elapsed = time.perf_counter() - started
+        print(f'[INFO] driver registry cache warmed: rows={rows} seconds={elapsed:.3f}', flush=True)
+    except Exception as exc:
+        elapsed = time.perf_counter() - started
+        print(f'[WARN] driver registry cache warm failed after {elapsed:.3f}s: {exc!r}', flush=True)
 
 
 def _get_updates(offset: int | None) -> list[dict[str, Any]]:
@@ -281,6 +295,7 @@ def _log_limit_request(message: dict[str, Any], text: str, allowed: bool, *, sou
 
 def _send_limit_result(chat_id: int, message_id: int | None, plate: str, year_month: str | None) -> None:
     _send_chat_action(chat_id)
+    started = time.perf_counter()
     db = SessionLocal()
     try:
         response_text = build_vehicle_limit_message(
@@ -291,6 +306,8 @@ def _send_limit_result(chat_id: int, message_id: int | None, plate: str, year_mo
     finally:
         db.close()
 
+    elapsed = time.perf_counter() - started
+    print(f'[INFO] /limit calculated plate={plate} year_month={year_month or current_year_month()} seconds={elapsed:.3f}', flush=True)
     _send_message(chat_id, response_text, reply_to_message_id=message_id)
 
 
@@ -381,6 +398,7 @@ def main() -> int:
     print('[INFO] token exists:', bool(token), flush=True)
     print('[INFO] dedicated token:', bool(_env('TELEGRAM_LIMIT_BOT_TOKEN')), flush=True)
     print('[INFO] allowed_chat_ids:', sorted(allowed) if allowed else 'ALL (not recommended)', flush=True)
+    _warm_caches()
 
     offset = _read_offset()
     print('[INFO] initial offset:', offset, flush=True)
