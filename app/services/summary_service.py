@@ -190,8 +190,8 @@ def build_monthly_vehicle_summary(db: Session, year_month: str | None = None) ->
 
     summary['status'] = statuses
     summary['worst_bucket'] = worst_buckets
-    summary['display_usage_pct'] = pd.Series(display_usage).round(2)
-    summary['display_remaining_liters'] = pd.Series(display_remaining).round(2)
+    summary['display_usage_pct'] = pd.to_numeric(pd.Series(display_usage), errors='coerce').fillna(0).round(2)
+    summary['display_remaining_liters'] = pd.to_numeric(pd.Series(display_remaining), errors='coerce').round(2)
 
     return summary.sort_values(['display_usage_pct', 'total_liters'], ascending=[False, False]).reset_index(drop=True)
 
