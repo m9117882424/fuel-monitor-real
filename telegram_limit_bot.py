@@ -41,7 +41,14 @@ def _bot_token() -> str:
 
 
 def _allowed_chat_ids() -> set[str]:
-    raw = _env('TELEGRAM_LIMIT_ALLOWED_CHAT_IDS') or _env('TELEGRAM_ALLOWED_CHAT_IDS')
+    raw_limit = _env('TELEGRAM_LIMIT_ALLOWED_CHAT_IDS')
+    if raw_limit.lower() in {'all', '*', 'any', 'everyone'}:
+        return set()
+
+    raw = raw_limit or _env('TELEGRAM_ALLOWED_CHAT_IDS')
+    if raw.lower() in {'all', '*', 'any', 'everyone'}:
+        return set()
+
     if not raw:
         raw = str(getattr(settings, 'telegram_chat_id', '') or '')
     return {item.strip() for item in raw.replace(';', ',').split(',') if item.strip()}
