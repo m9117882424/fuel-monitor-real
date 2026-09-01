@@ -6,6 +6,8 @@ from typing import Any
 import pandas as pd
 from sqlalchemy.orm import Session
 
+from ..config import settings
+from ..models import VehicleLimit
 from ..services.driver_registry_service import load_driver_registry
 from ..services.summary_service import build_monthly_vehicle_summary
 from ..utils import current_year_month, normalize_plate
@@ -88,6 +90,58 @@ def _latest_driver_registry() -> pd.DataFrame:
     return data[['plate', 'user_name', 'grade', 'position', 'directorate']]
 
 
+def _vehicle_limit_row(db: Session, normalized_plate: str) -> dict[str, Any] | None:
+    limit = db.query(VehicleLimit).filter(VehicleLimit.plate == normalized_plate).first()
+    if limit is None:
+        return None
+
+    limit_mode = str(limit.limit_mode or 'combined').lower()
+    unlimited = bool(limit.unlimited)
+    combined_limit = (
+        float(limit.combined_limit_liters)
+        if limit.combined_limit_liters is not None
+        else float(settings.default_monthly_limit_liters)
+    )
+    turpak_limit = (
+        float(limit.turpak_limit_liters)
+        if limit.turpak_limit_liters is not None
+        else float(settings.default_monthly_limit_liters)
+    )
+    cards_limit = (
+        float(limit.cards_limit_liters)
+        if limit.cards_limit_liters is not None
+        else float(settings.default_monthly_limit_liters)
+    )
+
+    return {
+        'plate': normalized_plate,
+        'tx_count': 0,
+        'sources': '',
+        'last_event_dt': None,
+        'turpak_liters': 0.0,
+        'shell_liters': 0.0,
+        'petrol_liters': 0.0,
+        'cards_liters': 0.0,
+        'total_liters': 0.0,
+        'total_amount_try': 0.0,
+        'limit_mode': limit_mode,
+        'unlimited': unlimited,
+        'combined_limit_liters': combined_limit,
+        'turpak_limit_liters': turpak_limit,
+        'cards_limit_liters': cards_limit,
+        'combined_remaining_liters': None if unlimited else combined_limit,
+        'turpak_remaining_liters': None if unlimited else turpak_limit,
+        'cards_remaining_liters': None if unlimited else cards_limit,
+        'combined_usage_pct': 0.0,
+        'turpak_usage_pct': 0.0,
+        'cards_usage_pct': 0.0,
+        'display_usage_pct': 0.0,
+        'display_remaining_liters': None if unlimited else (min(turpak_limit, cards_limit) if limit_mode == 'separate' else combined_limit),
+        'status': 'UNLIMITED' if unlimited else 'OK',
+        'worst_bucket': None,
+    }
+
+
 def _limit_text(row: pd.Series) -> str:
     if bool(row.get('unlimited', False)):
         return 'без лимита'
@@ -144,6 +198,24 @@ def _last_event_text(row: pd.Series) -> str:
         return _safe_text(value)
 
 
+def _select_vehicle_row(db: Session, normalized_plate: str, year_month: str) -> tuple[pd.Series | None, bool]:
+    """Return vehicle row and flag showing whether it was built from limit-only data."""
+    summary = build_monthly_vehicle_summary(db, year_month=year_month)
+
+    if summary is not None and not summary.empty:
+        data = summary.copy()
+        data['plate'] = data['plate'].apply(normalize_plate)
+        data = data[data['plate'] == normalized_plate].copy()
+        if not data.empty:
+            return data.iloc[0], False
+
+    limit_only = _vehicle_limit_row(db, normalized_plate)
+    if limit_only is None:
+        return None, False
+
+    return pd.Series(limit_only), True
+
+
 def build_vehicle_limit_message(db: Session, plate: str, year_month: str | None = None) -> str:
     """Build Telegram HTML response for one vehicle fuel limit card."""
     ym = year_month or current_year_month()
@@ -152,17 +224,11 @@ def build_vehicle_limit_message(db: Session, plate: str, year_month: str | None 
     if not normalized_plate:
         return 'Укажи госномер: <code>/limit 34ABC123</code>'
 
-    summary = build_monthly_vehicle_summary(db, year_month=ym)
-    if summary is None or summary.empty:
-        return f'Нет данных по лимитам за {html.escape(ym)}.'
+    row, limit_only = _select_vehicle_row(db, normalized_plate, ym)
+    if row is None:
+        return f'Не нашёл лимит или заправки по госномеру <b>{html.escape(normalized_plate)}</b> за {html.escape(ym)}.'
 
-    data = summary.copy()
-    data['plate'] = data['plate'].apply(normalize_plate)
-    data = data[data['plate'] == normalized_plate].copy()
-
-    if data.empty:
-        return f'Не нашёл данные по госномеру <b>{html.escape(normalized_plate)}</b> за {html.escape(ym)}.'
-
+    data = pd.DataFrame([row.to_dict()])
     drivers = _latest_driver_registry()
     if not drivers.empty:
         data = data.merge(drivers, on='plate', how='left')
@@ -173,9 +239,11 @@ def build_vehicle_limit_message(db: Session, plate: str, year_month: str | None 
     row = data.iloc[0]
     status = str(row.get('status') or 'OK').upper()
     icon = STATUS_ICON.get(status, '⚪')
+    note = '\n<i>За выбранный месяц заправок нет, показан установленный лимит.</i>\n' if limit_only else ''
 
     return (
-        f'{icon} <b>{html.escape(normalized_plate)}</b> — лимит топлива за {html.escape(ym)}\n\n'
+        f'{icon} <b>{html.escape(normalized_plate)}</b> — лимит топлива за {html.escape(ym)}\n'
+        f'{note}\n'
         f'Лимит: <b>{html.escape(_limit_text(row))}</b>\n'
         f'Перерасход: <b>{html.escape(_overrun_text(row))}</b>\n'
         f'Остаток: <b>{html.escape(_remaining_text(row))}</b>\n'
