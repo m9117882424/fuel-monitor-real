@@ -155,6 +155,39 @@ def _help_text() -> str:
     )
 
 
+def _sender_label(message: dict[str, Any]) -> str:
+    sender = message.get('from') or {}
+    chat = message.get('chat') or {}
+
+    user_id = sender.get('id') or chat.get('id') or '-'
+    username = sender.get('username') or chat.get('username') or '-'
+    first_name = sender.get('first_name') or ''
+    last_name = sender.get('last_name') or ''
+    full_name = ' '.join(x for x in [first_name, last_name] if x).strip() or '-'
+    chat_id = chat.get('id') or '-'
+    chat_type = chat.get('type') or '-'
+    chat_title = chat.get('title') or '-'
+
+    return (
+        f'chat_id={chat_id} chat_type={chat_type} chat_title={chat_title!r} '
+        f'user_id={user_id} username={username!r} full_name={full_name!r}'
+    )
+
+
+def _log_limit_request(message: dict[str, Any], text: str, allowed: bool) -> None:
+    plate, year_month, help_requested = _parse_limit_command(text)
+    requested_period = year_month or current_year_month()
+    print(
+        '[AUDIT] /limit request '
+        f'allowed={allowed} '
+        f'plate={plate or "-"} '
+        f'year_month={requested_period} '
+        f'help={help_requested} '
+        f'{_sender_label(message)}',
+        flush=True,
+    )
+
+
 def _handle_limit(chat_id: int, message_id: int | None, text: str) -> None:
     plate, year_month, help_requested = _parse_limit_command(text)
     if help_requested or not plate:
@@ -192,7 +225,10 @@ def _handle_update(update: dict[str, Any], allowed_chat_ids: set[str]) -> None:
     if chat_id is None:
         return
 
-    if allowed_chat_ids and str(chat_id) not in allowed_chat_ids:
+    allowed = not allowed_chat_ids or str(chat_id) in allowed_chat_ids
+    _log_limit_request(message, text, allowed)
+
+    if not allowed:
         print(f'[WARN] Unauthorized chat_id={chat_id}', flush=True)
         _send_message(chat_id, 'Доступ к команде /limit не разрешён.', reply_to_message_id=message_id)
         return
