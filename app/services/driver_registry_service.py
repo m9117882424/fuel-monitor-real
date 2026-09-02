@@ -13,6 +13,7 @@ from ..utils import normalize_plate
 
 PRIMARY_SHEET_NAME = "Список легкового автотранспорта"
 SECONDARY_SHEET_NAME = "Подменные Yedekler"
+SUPPORTED_EXCEL_EXTENSIONS = {".xlsx", ".xls", ".xlsm"}
 
 
 def _empty_df() -> pd.DataFrame:
@@ -196,6 +197,9 @@ def _read_one_driver_file(path: Path) -> pd.DataFrame:
     if path.name.startswith("~$"):
         return _empty_df()
 
+    if path.suffix.lower() not in SUPPORTED_EXCEL_EXTENSIONS:
+        return _empty_df()
+
     try:
         with pd.ExcelFile(path) as workbook:
             for sheet_name in _driver_sheet_candidates(workbook):
@@ -214,18 +218,33 @@ def _read_one_driver_file(path: Path) -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True)
 
 
-def _driver_files_signature(base_dir: Path, glob_pattern: str) -> tuple[tuple[str, int, int], ...]:
-    """
-    Cache key based on file names, mtimes and sizes.
-    If a roster file is replaced or edited, the key changes and cache refreshes automatically.
-    """
+def _driver_files(base_dir: Path, glob_pattern: str) -> list[Path]:
     if not base_dir.exists():
-        return tuple()
+        return []
 
-    signature = []
+    files: list[Path] = []
     for path in sorted(base_dir.glob(glob_pattern)):
         if path.name.startswith("~$"):
             continue
+        if path.suffix.lower() not in SUPPORTED_EXCEL_EXTENSIONS:
+            continue
+        if not path.is_file():
+            continue
+        files.append(path)
+    return files
+
+
+def _file_sort_key(path: Path) -> tuple[datetime, int, str]:
+    try:
+        mtime = int(path.stat().st_mtime)
+    except OSError:
+        mtime = 0
+    return (_extract_file_date(path), mtime, path.name)
+
+
+def _signature_from_paths(paths: list[Path]) -> tuple[tuple[str, int, int], ...]:
+    signature = []
+    for path in sorted(paths, key=_file_sort_key):
         try:
             stat = path.stat()
         except OSError:
@@ -234,7 +253,77 @@ def _driver_files_signature(base_dir: Path, glob_pattern: str) -> tuple[tuple[st
     return tuple(signature)
 
 
-@lru_cache(maxsize=8)
+def _latest_driver_file(base_dir: Path, glob_pattern: str) -> Path | None:
+    files = _driver_files(base_dir, glob_pattern)
+    if not files:
+        return None
+    return max(files, key=_file_sort_key)
+
+
+def _driver_files_signature(base_dir: Path, glob_pattern: str) -> tuple[tuple[str, int, int], ...]:
+    """
+    Cache key based on file names, mtimes and sizes.
+    If a roster file is replaced or edited, the key changes and cache refreshes automatically.
+    """
+    return _signature_from_paths(_driver_files(base_dir, glob_pattern))
+
+
+def _driver_files_signature_latest(base_dir: Path, glob_pattern: str) -> tuple[tuple[str, int, int], ...]:
+    latest = _latest_driver_file(base_dir, glob_pattern)
+    if latest is None:
+        return tuple()
+    return _signature_from_paths([latest])
+
+
+def _driver_files_signature_for_month(
+    base_dir: Path,
+    glob_pattern: str,
+    year_month: str,
+) -> tuple[tuple[str, int, int], ...]:
+    """
+    Return a focused file set for a monthly dashboard.
+
+    Roster files are daily, so loading the full archive is expensive. For a
+    requested month we load files dated inside that month plus the latest file
+    before the month start, so early-month events can still use the last known
+    roster when no same-day file exists.
+    """
+    files = _driver_files(base_dir, glob_pattern)
+    if not files:
+        return tuple()
+
+    try:
+        month_start = pd.Timestamp(f"{year_month}-01").to_pydatetime()
+        month_end = (pd.Timestamp(month_start) + pd.offsets.MonthBegin(1)).to_pydatetime()
+    except Exception:
+        return _driver_files_signature_latest(base_dir, glob_pattern)
+
+    dated: list[tuple[datetime, Path]] = [
+        (_extract_file_date(path), path)
+        for path in files
+        if _extract_file_date(path) != datetime.min
+    ]
+    if not dated:
+        return _driver_files_signature_latest(base_dir, glob_pattern)
+
+    selected: list[Path] = [
+        path for file_date, path in dated
+        if month_start <= file_date < month_end
+    ]
+
+    before = [item for item in dated if item[0] < month_start]
+    if before:
+        selected.append(max(before, key=lambda item: _file_sort_key(item[1]))[1])
+
+    if not selected:
+        return _driver_files_signature_latest(base_dir, glob_pattern)
+
+    # de-duplicate while preserving deterministic order
+    unique: dict[str, Path] = {str(path): path for path in selected}
+    return _signature_from_paths(list(unique.values()))
+
+
+@lru_cache(maxsize=16)
 def _load_driver_registry_cached(
     driver_enabled: bool,
     driver_input_dir: str,
@@ -243,8 +332,8 @@ def _load_driver_registry_cached(
     files_signature: tuple[tuple[str, int, int], ...],
 ) -> pd.DataFrame:
     """
-    Возвращает ИСТОРИЮ разнарядок, а не только последнюю запись по машине.
-    Dashboard calls this many times; reading Excel on every request is too expensive.
+    Возвращает историю разнарядок по набору файлов из files_signature.
+    Сами наборы файлов формируются отдельно: весь архив, последний файл или месяц.
     """
     if not driver_enabled:
         return _empty_df()
@@ -286,11 +375,46 @@ def _load_driver_registry_cached(
     return full
 
 
+def read_driver_file(path: str | Path) -> pd.DataFrame:
+    """Read one roster Excel file and all usable sheets inside it."""
+    return _read_one_driver_file(Path(path))
+
+
 def load_driver_registry() -> pd.DataFrame:
     base_dir = Path(settings.driver_input_dir) if settings.driver_input_dir else Path("")
     files_signature = _driver_files_signature(base_dir, settings.driver_glob) if settings.driver_input_dir else tuple()
 
     # Return a copy so downstream code can mutate columns without polluting cached data.
+    return _load_driver_registry_cached(
+        bool(settings.driver_enabled),
+        str(settings.driver_input_dir or ""),
+        str(settings.driver_glob or "*.xlsx"),
+        str(settings.driver_sheet_name or PRIMARY_SHEET_NAME),
+        files_signature,
+    ).copy()
+
+
+def load_latest_driver_registry() -> pd.DataFrame:
+    base_dir = Path(settings.driver_input_dir) if settings.driver_input_dir else Path("")
+    files_signature = _driver_files_signature_latest(base_dir, settings.driver_glob) if settings.driver_input_dir else tuple()
+
+    return _load_driver_registry_cached(
+        bool(settings.driver_enabled),
+        str(settings.driver_input_dir or ""),
+        str(settings.driver_glob or "*.xlsx"),
+        str(settings.driver_sheet_name or PRIMARY_SHEET_NAME),
+        files_signature,
+    ).copy()
+
+
+def load_driver_registry_for_month(year_month: str) -> pd.DataFrame:
+    base_dir = Path(settings.driver_input_dir) if settings.driver_input_dir else Path("")
+    files_signature = (
+        _driver_files_signature_for_month(base_dir, settings.driver_glob, year_month)
+        if settings.driver_input_dir
+        else tuple()
+    )
+
     return _load_driver_registry_cached(
         bool(settings.driver_enabled),
         str(settings.driver_input_dir or ""),
