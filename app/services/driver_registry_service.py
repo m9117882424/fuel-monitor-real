@@ -120,12 +120,13 @@ def _extract_columns(raw: pd.DataFrame) -> pd.DataFrame:
     return data
 
 
-def _read_sheet(path: Path, sheet_name: str) -> pd.DataFrame:
+def _read_sheet_from_workbook(workbook: pd.ExcelFile, path: Path, sheet_name: str) -> pd.DataFrame:
     # Разные листы иногда имеют шапку на разных строках. Пробуем несколько вариантов.
+    # workbook уже открыт один раз на файл; это существенно быстрее, чем открывать xlsx заново на каждый лист.
     last_error: Exception | None = None
     for header_row in (2, 1, 0):
         try:
-            raw = pd.read_excel(path, sheet_name=sheet_name, header=header_row)
+            raw = pd.read_excel(workbook, sheet_name=sheet_name, header=header_row)
             data = _extract_columns(raw)
             if data.empty and "plate_raw" not in data.columns:
                 continue
@@ -159,28 +160,30 @@ def _read_sheet(path: Path, sheet_name: str) -> pd.DataFrame:
     return _empty_df()
 
 
-def _driver_sheet_candidates(path: Path) -> list[str]:
+def _read_sheet(path: Path, sheet_name: str) -> pd.DataFrame:
+    try:
+        with pd.ExcelFile(path) as workbook:
+            return _read_sheet_from_workbook(workbook, path, sheet_name)
+    except Exception:
+        return _empty_df()
+
+
+def _driver_sheet_candidates(workbook: pd.ExcelFile) -> list[str]:
     """
     Return sheets to inspect.
 
     Priority sheets are checked first for backward compatibility, then every
     other worksheet in the workbook is checked as a safety net. Sheets without
-    a recognizable plate column are ignored by _read_sheet().
+    a recognizable plate column are ignored by _read_sheet_from_workbook().
     """
     sheet_candidates: list[str] = []
 
     configured_sheet = str(getattr(settings, "driver_sheet_name", "") or "").strip()
     for sheet_name in (configured_sheet, PRIMARY_SHEET_NAME, SECONDARY_SHEET_NAME):
-        if sheet_name and sheet_name not in sheet_candidates:
+        if sheet_name and sheet_name in workbook.sheet_names and sheet_name not in sheet_candidates:
             sheet_candidates.append(sheet_name)
 
-    try:
-        with pd.ExcelFile(path) as workbook:
-            workbook_sheets = list(workbook.sheet_names)
-    except Exception:
-        return sheet_candidates
-
-    for sheet_name in workbook_sheets:
+    for sheet_name in workbook.sheet_names:
         if sheet_name and sheet_name not in sheet_candidates:
             sheet_candidates.append(sheet_name)
 
@@ -190,13 +193,20 @@ def _driver_sheet_candidates(path: Path) -> list[str]:
 def _read_one_driver_file(path: Path) -> pd.DataFrame:
     frames: list[pd.DataFrame] = []
 
-    for sheet_name in _driver_sheet_candidates(path):
-        try:
-            df = _read_sheet(path, sheet_name)
-            if not df.empty:
-                frames.append(df)
-        except Exception:
-            continue
+    if path.name.startswith("~$"):
+        return _empty_df()
+
+    try:
+        with pd.ExcelFile(path) as workbook:
+            for sheet_name in _driver_sheet_candidates(workbook):
+                try:
+                    df = _read_sheet_from_workbook(workbook, path, sheet_name)
+                    if not df.empty:
+                        frames.append(df)
+                except Exception:
+                    continue
+    except Exception:
+        return _empty_df()
 
     if not frames:
         return _empty_df()
@@ -214,6 +224,8 @@ def _driver_files_signature(base_dir: Path, glob_pattern: str) -> tuple[tuple[st
 
     signature = []
     for path in sorted(base_dir.glob(glob_pattern)):
+        if path.name.startswith("~$"):
+            continue
         try:
             stat = path.stat()
         except OSError:
@@ -251,7 +263,9 @@ def _load_driver_registry_cached(
     frames: list[pd.DataFrame] = []
     for path in files:
         try:
-            frames.append(_read_one_driver_file(path))
+            df = _read_one_driver_file(path)
+            if not df.empty:
+                frames.append(df)
         except Exception:
             continue
 
