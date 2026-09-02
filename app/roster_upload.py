@@ -7,7 +7,7 @@ from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import Response
 
 from .config import settings
-from .services.driver_registry_service import clear_driver_registry_cache, load_driver_registry
+from .services.driver_registry_service import clear_driver_registry_cache, read_driver_file
 from .utils import now_local
 
 
@@ -111,9 +111,10 @@ def install_roster_upload(app: FastAPI) -> None:
         with target.open("wb") as output:
             shutil.copyfileobj(file.file, output)
 
-        clear_driver_registry_cache()
-        registry = load_driver_registry()
-        rows = int(len(registry.index)) if registry is not None else 0
+        # Проверяем только загруженный файл. Архив разнарядок может содержать сотни
+        # ежедневных файлов, поэтому полное перечитывание архива при загрузке слишком дорогое.
+        uploaded_registry = read_driver_file(target)
+        rows = int(len(uploaded_registry.index)) if uploaded_registry is not None else 0
         if rows == 0:
             try:
                 target.unlink(missing_ok=True)
@@ -122,16 +123,18 @@ def install_roster_upload(app: FastAPI) -> None:
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    "Не удалось прочитать разнарядку. Проверьте листы «Список легкового автотранспорта» "
-                    "или «Подменные Yedekler» и наличие столбца с госномером."
+                    "Не удалось прочитать разнарядку. Проверьте листы «Список легкового автотранспорта», "
+                    "«Подменные Yedekler» или другие листы с колонкой госномера."
                 ),
             )
+
+        clear_driver_registry_cache()
 
         return {
             "ok": True,
             "filename": target.name,
             "rows": rows,
-            "detail": "Разнарядка сохранена и перечитана",
+            "detail": "Разнарядка сохранена; кэш очищен",
         }
 
     @app.middleware("http")
