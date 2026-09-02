@@ -159,17 +159,38 @@ def _read_sheet(path: Path, sheet_name: str) -> pd.DataFrame:
     return _empty_df()
 
 
+def _driver_sheet_candidates(path: Path) -> list[str]:
+    """
+    Return sheets to inspect.
+
+    Priority sheets are checked first for backward compatibility, then every
+    other worksheet in the workbook is checked as a safety net. Sheets without
+    a recognizable plate column are ignored by _read_sheet().
+    """
+    sheet_candidates: list[str] = []
+
+    configured_sheet = str(getattr(settings, "driver_sheet_name", "") or "").strip()
+    for sheet_name in (configured_sheet, PRIMARY_SHEET_NAME, SECONDARY_SHEET_NAME):
+        if sheet_name and sheet_name not in sheet_candidates:
+            sheet_candidates.append(sheet_name)
+
+    try:
+        with pd.ExcelFile(path) as workbook:
+            workbook_sheets = list(workbook.sheet_names)
+    except Exception:
+        return sheet_candidates
+
+    for sheet_name in workbook_sheets:
+        if sheet_name and sheet_name not in sheet_candidates:
+            sheet_candidates.append(sheet_name)
+
+    return sheet_candidates
+
+
 def _read_one_driver_file(path: Path) -> pd.DataFrame:
     frames: list[pd.DataFrame] = []
 
-    sheet_candidates = []
-    if getattr(settings, "driver_sheet_name", None):
-        sheet_candidates.append(settings.driver_sheet_name)
-    for sheet_name in (PRIMARY_SHEET_NAME, SECONDARY_SHEET_NAME):
-        if sheet_name not in sheet_candidates:
-            sheet_candidates.append(sheet_name)
-
-    for sheet_name in sheet_candidates:
+    for sheet_name in _driver_sheet_candidates(path):
         try:
             df = _read_sheet(path, sheet_name)
             if not df.empty:
