@@ -39,11 +39,36 @@ def _canon_col(value) -> str:
     return s
 
 
+def _match_key(value) -> str:
+    s = _canon_col(value).lower()
+    mapping = str.maketrans({
+        "ı": "i",
+        "İ": "i",
+        "ş": "s",
+        "Ş": "s",
+        "ğ": "g",
+        "Ğ": "g",
+        "ü": "u",
+        "Ü": "u",
+        "ö": "o",
+        "Ö": "o",
+        "ç": "c",
+        "Ç": "c",
+        "&": " ",
+    })
+    s = s.translate(mapping)
+    return re.sub(r"[^0-9a-zа-яё]+", " ", s, flags=re.IGNORECASE).strip()
+
+
 def _extract_file_date(path: Path) -> datetime:
-    m = re.search(r"(\d{2}\.\d{2}\.\d{4})", path.name)
-    if not m:
+    matches = re.findall(r"(\d{2}\.\d{2}\.\d{4})", path.name)
+    if not matches:
         return datetime.min
-    return datetime.strptime(m.group(1), "%d.%m.%Y")
+
+    # Uploaded files may be saved with an upload timestamp before the original
+    # roster name, for example: "02.09.2026_18-45-00 Разнарядка 01.09.2026.xlsx".
+    # The roster business date is normally the last date in the file name.
+    return datetime.strptime(matches[-1], "%d.%m.%Y")
 
 
 def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -54,9 +79,19 @@ def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 def _find_first_column(columns: list[str], aliases: list[str]) -> str | None:
     canon_aliases = {_canon_col(a) for a in aliases}
+    alias_keys = [_match_key(a) for a in aliases if _match_key(a)]
+
     for col in columns:
         if _canon_col(col) in canon_aliases:
             return col
+
+    for col in columns:
+        col_key = _match_key(col)
+        if not col_key:
+            continue
+        for alias_key in alias_keys:
+            if col_key == alias_key or alias_key in col_key:
+                return col
     return None
 
 
@@ -67,35 +102,45 @@ def _extract_columns(raw: pd.DataFrame) -> pd.DataFrame:
     alias_map = {
         "vehicle_model": [
             "Марка, модель / Marka, model",
+            "MARKA&MODEL / Марка, модель",
+            "MARKA MODEL / Марка, модель",
             "Marka, model",
+            "MARKA&MODEL",
+            "MARKA MODEL",
             "Марка, модель",
         ],
         "plate_raw": [
             "Гос рег знак / PLAKA",
+            "PLAKA / гос рег знак",
+            "PLAKA / Гос рег знак",
             "PLAKA",
             "Plaka",
             "Гос рег знак",
         ],
         "grade": [
             "Грейд / SCALA",
+            "SCALA / Грейд",
             "SCALA",
             "Scala",
             "Грейд",
         ],
         "user_name": [
             "Пользователь / KULLANICI",
+            "KULLANICI / Пользователь",
             "KULLANICI",
             "Kullanıcı",
             "Пользователь",
         ],
         "position": [
             "Должность / GÖREVİ",
+            "GÖREVİ / Должность",
             "GÖREVİ",
             "Görevi",
             "Должность",
         ],
         "directorate": [
             "Дирекция / Directorate",
+            "Directorate / Дирекция",
             "Directorate",
             "Дирекция",
         ],
