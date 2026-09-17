@@ -139,19 +139,19 @@ class ShellTtsClient:
 
 SHELL_API_COLUMN_ALIASES: dict[str, tuple[str, ...]] = {
     'Date': ('TRANSACTIONDATE', 'TRANSACTION_DATE', 'SALEDATE', 'PROCESSDATE', 'DATE'),
-    'Номерной знак': ('PLATECODE', 'PLATE_CODE', 'PLATE', 'PLATENO'),
-    'Вид топлива': ('PRODUCTNAME', 'PRODUCT_NAME', 'FUELTYPE', 'PRODUCT'),
-    'Общий литр (л)': ('QUANTITY', 'LITER', 'LITRE', 'VOLUME', 'AMOUNTLT'),
-    'Цена (тл)': ('UNITPRICE', 'UNIT_PRICE', 'PRICE'),
-    'Стоимость (тл)': ('TOTALAMOUNT', 'TOTAL_AMOUNT', 'AMOUNT', 'SALEAMOUNT'),
-    'Код станции': ('STATIONCODE', 'STATION_CODE', 'DEALERCODE'),
-    'Название станции': ('STATIONNAME', 'STATION_NAME', 'DEALERNAME'),
-    'Провинция': ('STATIONCITY', 'STATION_CITY', 'CITY', 'CITYNAME'),
-    'Номер карты': ('CARDNUMBER', 'CARD_NUMBER', 'CARDNO'),
-    'Название группы': ('DEPARTMENTNAME', 'DEPARTMENT_NAME', 'DEPARTMANADI'),
-    'Departman Kodu': ('DEPARTMENTCODE', 'DEPARTMENT_CODE', 'DEPARTMANKODU'),
-    'Километраж': ('ODOMETER', 'KILOMETER', 'KILOMETRE'),
-    'Satış Tipi': ('SALETYPE', 'SALE_TYPE', 'TRANSACTIONTYPE'),
+    'Номерной знак': ('PLATECD', 'PLATE_CD', 'PLATECODE', 'PLATE_CODE', 'PLATE', 'PLATENO', 'UTTS_PLATE_NO'),
+    'Вид топлива': ('FUEL_NAME', 'FUELNAME', 'PRODUCTNAME', 'PRODUCT_NAME', 'FUELTYPE', 'PRODUCT'),
+    'Общий литр (л)': ('VOLUME', 'QUANTITY', 'LITER', 'LITRE', 'AMOUNTLT'),
+    'Цена (тл)': ('UNIT_PRICE', 'UNITPRICE', 'PRICE'),
+    'Стоимость (тл)': ('SALES_TOTAL_AMOUNT', 'SALESTOTALAMOUNT', 'TOTALAMOUNT', 'TOTAL_AMOUNT', 'AMOUNT', 'SALEAMOUNT'),
+    'Код станции': ('RETAIL_OUTLET_CODE', 'RETAILOUTLETCODE', 'STATIONCODE', 'STATION_CODE', 'DEALERCODE'),
+    'Название станции': ('RETAIL_OUTLET_NAME', 'RETAILOUTLETNAME', 'STATIONNAME', 'STATION_NAME', 'DEALERNAME'),
+    'Провинция': ('RTL_OTLT_PROVINCE', 'RTLOTLTPROVINCE', 'STATIONCITY', 'STATION_CITY', 'CITY', 'CITYNAME'),
+    'Номер карты': ('CARD_NO', 'CARDNO', 'CARDNUMBER', 'CARD_NUMBER'),
+    'Название группы': ('DEPARTMENT_NAME', 'DEPARTMENTNAME', 'DEPARTMANADI'),
+    'Departman Kodu': ('DEPARTMENT_CODE', 'DEPARTMENTCODE', 'DEPARTMANKODU'),
+    'Километраж': ('VEHICLE_KM', 'VEHICLEKM', 'ODOMETER', 'KILOMETER', 'KILOMETRE'),
+    'Satış Tipi': ('SALES_TYPE', 'SALESTYPE', 'SALE_TYPE', 'TRANSACTIONTYPE'),
 }
 
 
