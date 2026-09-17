@@ -988,6 +988,10 @@ def _leadership_html(ym: str) -> str:
     h1,h2 { margin:0; }
     .muted { color:var(--muted); }
     .actions,.filters { display:flex; gap:12px; flex-wrap:wrap; }
+    .main-login { display:flex; gap:8px; align-items:center; flex-wrap:wrap; border:1px solid var(--border); border-radius:18px; padding:6px; background:#f8fafc; }
+    .main-login input { width:150px; padding:8px 10px; }
+    .main-login button { padding:8px 12px; }
+    .main-login-status { font-size:12px; color:var(--muted); min-width:92px; }
     button,.btn,input,select { border:1px solid #cbd5e1; background:#fff; color:#0f172a; padding:10px 16px; border-radius:16px; font-size:14px; }
     button,.btn { cursor:pointer; text-decoration:none; }
     .btn.primary { background:#111827; color:#fff; border-color:#111827; }
@@ -1049,6 +1053,11 @@ def _leadership_html(ym: str) -> str:
       <div class='muted'>Текущий месяц · Последнее обновление: <span id='last-update'>—</span></div>
     </div>
     <div class='actions'>
+      <div class='main-login' id='main-login-box'>
+        <input id='main-login-password' type='password' placeholder='Пароль для sync' autocomplete='current-password'/>
+        <button id='main-login-btn' type='button'>Войти</button>
+        <span id='main-login-status' class='main-login-status'>—</span>
+      </div>
       <input id='shell-upload-input' type='file' accept='.xlsx,.xls,.csv' style='display:none'/>
       <button id='shell-upload-btn' type='button'>Загрузить файл Shell</button>
       <button id='sync-btn' type='button'>Синхронизировать источники</button>
@@ -1366,6 +1375,51 @@ function renderSources(data) {
   });
 }
 
+
+function setMainLoginStatus(message) {
+  const status = document.getElementById('main-login-status');
+  if (status) status.textContent = message || '—';
+}
+function focusMainLogin(message) {
+  setMainLoginStatus(message || 'Нужен вход');
+  const input = document.getElementById('main-login-password');
+  if (input) input.focus();
+}
+async function loginFromDashboard() {
+  const input = document.getElementById('main-login-password');
+  const button = document.getElementById('main-login-btn');
+  const password = input ? String(input.value || '') : '';
+  if (!password) {
+    focusMainLogin('Введите пароль');
+    return false;
+  }
+  try {
+    if (button) button.disabled = true;
+    setMainLoginStatus('Проверка...');
+    const res = await fetch('/limits-admin/login', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({password: password}),
+      credentials: 'same-origin'
+    });
+    if (!res.ok) {
+      setMainLoginStatus('Пароль неверный');
+      alert('Пароль неверный');
+      return false;
+    }
+    if (input) input.value = '';
+    setMainLoginStatus('Вход выполнен');
+    return true;
+  } catch (e) {
+    console.error(e);
+    setMainLoginStatus('Ошибка входа');
+    alert('Не удалось выполнить вход');
+    return false;
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
 async function uploadShellFile(file) {
   const formData = new FormData();
   formData.append('file', file);
@@ -1379,7 +1433,7 @@ async function uploadShellFile(file) {
     payload = { detail: rawText || 'Сервер вернул пустой ответ' };
   }
   if (!res.ok || !payload.ok) {
-    const message = res.status === 401 ? 'Нужен вход в раздел лимитов для загрузки файла Shell' : (payload.detail || 'Не удалось загрузить и обработать файл Shell');
+    const message = res.status === 401 ? 'Введите пароль на главной странице для загрузки файла Shell' : (payload.detail || 'Не удалось загрузить и обработать файл Shell');
     setStatusBar(true, 'Ошибка загрузки', message, 'error', 100);
     throw new Error(message);
   }
@@ -1409,7 +1463,8 @@ async function reloadDashboard(runSync) {
       const syncRes = await fetch('/dashboard/refresh', { method: 'POST', credentials: 'same-origin' });
       if (!syncRes.ok) {
         if (syncRes.status === 401) {
-          throw new Error('Нужен вход в раздел лимитов для синхронизации источников. Откройте «Лимиты», войдите и повторите синхронизацию.');
+          focusMainLogin('Нужен вход');
+          throw new Error('Введите пароль на главной странице и повторите синхронизацию.');
         }
         throw new Error('Ошибка backend при синхронизации источников: HTTP ' + syncRes.status);
       }
@@ -1446,8 +1501,19 @@ document.addEventListener('DOMContentLoaded', function () {
   const uploadBtn = document.getElementById('shell-upload-btn');
   const uploadInput = document.getElementById('shell-upload-input');
   const syncBtn = document.getElementById('sync-btn');
+  const mainLoginBtn = document.getElementById('main-login-btn');
+  const mainLoginPassword = document.getElementById('main-login-password');
   const detailModal = document.getElementById('vehicle-detail-modal');
   const detailCloseBtn = document.getElementById('vehicle-detail-close');
+  if (mainLoginBtn) mainLoginBtn.addEventListener('click', function () { loginFromDashboard(); });
+  if (mainLoginPassword) {
+    mainLoginPassword.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        loginFromDashboard();
+      }
+    });
+  }
   document.getElementById('refresh-btn').addEventListener('click', function () { reloadDashboard(false); });
   if (syncBtn) syncBtn.addEventListener('click', function () { reloadDashboard(true); });
   if (detailCloseBtn) {
