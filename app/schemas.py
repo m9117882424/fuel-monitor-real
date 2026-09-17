@@ -10,6 +10,9 @@ class SyncResult(BaseModel):
     source: str
     rows_loaded: int
     detail: str | None = None
+    rows_received: int | None = None
+    rows_normalized: int | None = None
+    duplicate_rows: int | None = None
 
 
 class SyncRunResponse(BaseModel):

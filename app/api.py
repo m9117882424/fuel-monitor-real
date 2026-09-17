@@ -689,6 +689,46 @@ def _is_limits_admin(session_cookie: str | None) -> bool:
     return session_cookie == _admin_cookie_value()
 
 
+def _extract_sync_detail_int(detail: str | None, key: str) -> int | None:
+    if not detail:
+        return None
+    match = re.search(rf'(?:^|[,\s]){re.escape(key)}=(\d+)', detail)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
+def _source_run_stats(run: ImportRun | None) -> dict[str, int | None]:
+    if run is None:
+        return {
+            "rows_received": None,
+            "rows_normalized": None,
+            "duplicate_rows": None,
+        }
+    detail = run.detail or ""
+    rows_loaded = int(run.rows_loaded or 0)
+    rows_received = _extract_sync_detail_int(detail, "received")
+    rows_normalized = _extract_sync_detail_int(detail, "normalized")
+    inserted = _extract_sync_detail_int(detail, "inserted")
+    duplicate_rows = _extract_sync_detail_int(detail, "duplicates")
+
+    if inserted is None:
+        inserted = rows_loaded
+    if rows_normalized is None and rows_received is not None:
+        rows_normalized = rows_received
+    if duplicate_rows is None and rows_normalized is not None:
+        duplicate_rows = max(rows_normalized - inserted, 0)
+
+    return {
+        "rows_received": rows_received,
+        "rows_normalized": rows_normalized,
+        "duplicate_rows": duplicate_rows,
+    }
+
+
 def check_write_access(
     x_api_token: str | None = Header(default=None),
     limits_admin_session: str | None = Cookie(default=None, alias=LIMITS_COOKIE_NAME),
@@ -710,6 +750,7 @@ def _latest_source_runs(db: Session) -> list[dict[str, Any]]:
             .order_by(ImportRun.started_at.desc())
             .first()
         )
+        stats = _source_run_stats(run)
         if run is None:
             result.append(
                 {
@@ -718,6 +759,7 @@ def _latest_source_runs(db: Session) -> list[dict[str, Any]]:
                     "rows_loaded": 0,
                     "last_sync": None,
                     "detail": "Нет запусков",
+                    **stats,
                 }
             )
         else:
@@ -728,6 +770,7 @@ def _latest_source_runs(db: Session) -> list[dict[str, Any]]:
                     "rows_loaded": int(run.rows_loaded or 0),
                     "last_sync": run.finished_at or run.started_at,
                     "detail": run.detail or "",
+                    **stats,
                 }
             )
     return result
@@ -1369,8 +1412,21 @@ function renderSources(data) {
   (data.sources || []).forEach(s => {
     const item = document.createElement('div');
     item.className = 'source-row';
-    item.innerHTML = '<div class="source-head"><div class="plate">' + s.name + '</div><span class="' + sourceBadgeClass(s.status) + '">' + String(s.status || '').toUpperCase() + '</span></div>' +
-      '<div class="muted" style="margin-top:10px;">Строк загружено: ' + s.rows_loaded + '<br/>Последний sync: ' + formatDate(s.last_sync) + '<br/>' + (s.detail || '') + '</div>';
+    const lines = [];
+    if (s.rows_received !== null && s.rows_received !== undefined) {
+      lines.push('Получено из API/файла: ' + Number(s.rows_received || 0));
+    }
+    if (s.rows_normalized !== null && s.rows_normalized !== undefined) {
+      lines.push('Распознано операций: ' + Number(s.rows_normalized || 0));
+    }
+    lines.push('Новых в БД: ' + Number(s.rows_loaded || 0));
+    if (s.duplicate_rows !== null && s.duplicate_rows !== undefined) {
+      lines.push('Уже было/дубли: ' + Number(s.duplicate_rows || 0));
+    }
+    lines.push('Последний sync: ' + formatDate(s.last_sync));
+    if (s.detail) lines.push(String(s.detail));
+    item.innerHTML = '<div class="source-head"><div class="plate">' + escapeHtml(s.name || '') + '</div><span class="' + sourceBadgeClass(s.status) + '">' + escapeHtml(String(s.status || '').toUpperCase()) + '</span></div>' +
+      '<div class="muted" style="margin-top:10px;">' + lines.map(escapeHtml).join('<br/>') + '</div>';
     c.appendChild(item);
   });
 }

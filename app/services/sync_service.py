@@ -33,6 +33,80 @@ class SourceSyncResult:
     source: str
     rows_loaded: int
     detail: str | None = None
+    rows_received: int | None = None
+    rows_normalized: int | None = None
+    duplicate_rows: int | None = None
+
+
+def _sync_stats_detail(
+    detail: str | None,
+    *,
+    rows_received: int | None,
+    rows_normalized: int | None,
+    rows_loaded: int,
+    duplicate_rows: int | None = None,
+) -> tuple[str | None, int | None]:
+    if rows_normalized is None:
+        rows_normalized = rows_loaded
+    if duplicate_rows is None and rows_normalized is not None:
+        duplicate_rows = max(int(rows_normalized) - int(rows_loaded or 0), 0)
+
+    parts = []
+    if rows_received is not None:
+        parts.append(f'received={int(rows_received)}')
+    if rows_normalized is not None:
+        parts.append(f'normalized={int(rows_normalized)}')
+    parts.append(f'inserted={int(rows_loaded or 0)}')
+    if duplicate_rows is not None:
+        parts.append(f'duplicates={int(duplicate_rows)}')
+
+    metrics = ', '.join(parts)
+    if not detail:
+        return metrics, duplicate_rows
+    if 'inserted=' in detail and 'duplicates=' in detail:
+        return detail, duplicate_rows
+    return f'{detail}, {metrics}', duplicate_rows
+
+
+def _finish_source_sync(
+    db: Session,
+    run: ImportRun,
+    *,
+    source: str,
+    rows_loaded: int,
+    detail: str | None = None,
+    status: str = 'ok',
+    rows_received: int | None = None,
+    rows_normalized: int | None = None,
+    duplicate_rows: int | None = None,
+) -> SourceSyncResult:
+    detail, duplicate_rows = _sync_stats_detail(
+        detail,
+        rows_received=rows_received,
+        rows_normalized=rows_normalized,
+        rows_loaded=rows_loaded,
+        duplicate_rows=duplicate_rows,
+    )
+    _track_run_finish(db, run, rows_loaded, status=status, detail=detail)
+    return SourceSyncResult(
+        source=source,
+        rows_loaded=rows_loaded,
+        detail=detail,
+        rows_received=rows_received,
+        rows_normalized=rows_normalized,
+        duplicate_rows=duplicate_rows,
+    )
+
+
+def _count_payload_rows(payload) -> int:
+    if isinstance(payload, list):
+        return len(payload)
+    if isinstance(payload, dict):
+        for key in ('data', 'rows', 'items', 'salesList'):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return len(value)
+    return 0
 
 
 def _track_run_start(db: Session, source: str) -> ImportRun:
@@ -140,8 +214,15 @@ def _sync_shell_file_fallback(db: Session, run: ImportRun, api_error: str | None
     detail = f'file fallback {path}'
     if api_error:
         detail += f'; API error: {api_error}'
-    _track_run_finish(db, run, rows_loaded, detail=detail)
-    return SourceSyncResult(source='shell_excel', rows_loaded=rows_loaded, detail=detail)
+    return _finish_source_sync(
+        db,
+        run,
+        source='shell_excel',
+        rows_loaded=rows_loaded,
+        detail=detail,
+        rows_received=int(len(raw.index)) if raw is not None else 0,
+        rows_normalized=int(len(events.index)) if events is not None else 0,
+    )
 
 
 def sync_shell(db: Session) -> SourceSyncResult:
@@ -168,11 +249,18 @@ def sync_shell(db: Session) -> SourceSyncResult:
             raw = shell_transactions_to_legacy_df(rows)
             events = normalize_shell_df(raw)
             rows_loaded = save_events(db, events)
-            detail = f'api GetCustomerSalesTransaction {start_dt.isoformat()} -> {end_dt.isoformat()}, received={len(rows)}'
+            detail = f'api GetCustomerSalesTransaction {start_dt.isoformat()} -> {end_dt.isoformat()}'
             if process_result:
                 detail += f', result={process_result}'
-            _track_run_finish(db, run, rows_loaded, detail=detail)
-            return SourceSyncResult(source='shell_excel', rows_loaded=rows_loaded, detail=detail)
+            return _finish_source_sync(
+                db,
+                run,
+                source='shell_excel',
+                rows_loaded=rows_loaded,
+                detail=detail,
+                rows_received=len(rows),
+                rows_normalized=int(len(events.index)) if events is not None else 0,
+            )
 
         if settings.shell_file_fallback_enabled:
             return _sync_shell_file_fallback(db, run)
@@ -226,6 +314,7 @@ def sync_petrol(db: Session) -> SourceSyncResult:
 
             frames: list[pd.DataFrame] = []
             chunk_count = 0
+            rows_received = 0
             for chunk_start, chunk_end in _iter_petrol_chunks(start_dt, end_dt, chunk_days=PETROL_CHUNK_DAYS):
                 payload = client.get_sales_with_invoice_infos(
                     start_date=chunk_start,
@@ -233,6 +322,7 @@ def sync_petrol(db: Session) -> SourceSyncResult:
                     fleet_id=settings.petrol_fleet_id or settings.petrol_fleet_list or None,
                     holding_id=settings.petrol_holding_id,
                 )
+                rows_received += _count_payload_rows(payload)
                 events = _petrol_payload_to_events(payload)
                 if not events.empty:
                     frames.append(events)
@@ -243,8 +333,15 @@ def sync_petrol(db: Session) -> SourceSyncResult:
             detail = f'api GET_SALES_WITH_INVOICE_INFOS {start_dt} -> {end_dt}, chunks={chunk_count}'
             if settings.petrol_proxy_url:
                 detail += ', proxy=enabled'
-            _track_run_finish(db, run, rows_loaded, detail=detail)
-            return SourceSyncResult(source='petrol', rows_loaded=rows_loaded, detail=detail)
+            return _finish_source_sync(
+                db,
+                run,
+                source='petrol',
+                rows_loaded=rows_loaded,
+                detail=detail,
+                rows_received=rows_received,
+                rows_normalized=int(len(all_events.index)) if all_events is not None else 0,
+            )
 
         path = None
         if settings.petrol_input_path:
@@ -262,8 +359,15 @@ def sync_petrol(db: Session) -> SourceSyncResult:
         rows_loaded = save_events(db, events)
 
         detail = f'file {path}'
-        _track_run_finish(db, run, rows_loaded, detail=detail)
-        return SourceSyncResult(source='petrol', rows_loaded=rows_loaded, detail=detail)
+        return _finish_source_sync(
+            db,
+            run,
+            source='petrol',
+            rows_loaded=rows_loaded,
+            detail=detail,
+            rows_received=int(len(raw.index)) if raw is not None else 0,
+            rows_normalized=int(len(events.index)) if events is not None else 0,
+        )
 
     except requests.exceptions.ReadTimeout as exc:
         db.rollback()
@@ -300,8 +404,15 @@ def sync_turpak(db: Session) -> SourceSyncResult:
         rows_loaded = save_events(db, events)
 
         detail = f'{start_dt} -> {end_dt}'
-        _track_run_finish(db, run, rows_loaded, detail=detail)
-        return SourceSyncResult(source='turpak', rows_loaded=rows_loaded, detail=detail)
+        return _finish_source_sync(
+            db,
+            run,
+            source='turpak',
+            rows_loaded=rows_loaded,
+            detail=detail,
+            rows_received=len(sales) if isinstance(sales, list) else 0,
+            rows_normalized=int(len(events.index)) if events is not None else 0,
+        )
 
     except Exception as exc:
         db.rollback()
