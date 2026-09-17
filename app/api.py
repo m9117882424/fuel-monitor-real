@@ -1370,7 +1370,7 @@ async function uploadShellFile(file) {
   const formData = new FormData();
   formData.append('file', file);
   setStatusBar(true, 'Загрузка файла Shell', 'Файл отправляется на сервер и сразу уходит в импорт.', 'upload', 15);
-  const res = await fetch('/shell/upload', { method: 'POST', body: formData });
+  const res = await fetch('/shell/upload', { method: 'POST', body: formData, credentials: 'same-origin' });
   const rawText = await res.text();
   let payload = {};
   try {
@@ -1406,8 +1406,13 @@ async function reloadDashboard(runSync) {
 
     if (runSync) {
       setStatusBar(true, 'Синхронизация источников', 'Стартовал sync. Ждём ответ сервера.', 'sync', 35);
-      const syncRes = await fetch('/dashboard/refresh', { method: 'POST' });
-      if (!syncRes.ok) throw new Error(syncRes.status === 401 ? 'Нужен вход в раздел лимитов для синхронизации источников' : 'Sync failed');
+      const syncRes = await fetch('/dashboard/refresh', { method: 'POST', credentials: 'same-origin' });
+      if (!syncRes.ok) {
+        if (syncRes.status === 401) {
+          throw new Error('Нужен вход в раздел лимитов для синхронизации источников. Откройте «Лимиты», войдите и повторите синхронизацию.');
+        }
+        throw new Error('Ошибка backend при синхронизации источников: HTTP ' + syncRes.status);
+      }
       setStatusBar(true, 'Синхронизация источников', 'Синхронизация завершена. Перечитываем витрину.', 'load', 70);
     }
 
@@ -1424,8 +1429,9 @@ async function reloadDashboard(runSync) {
     setTimeout(() => setStatusBar(false, '', '', '', 0), 1200);
   } catch (e) {
     console.error(e);
-    setStatusBar(true, runSync ? 'Ошибка синхронизации' : 'Ошибка обновления', 'Не удалось обновить данные. Проверь backend и попробуй ещё раз.', 'error', 100);
-    alert(runSync ? 'Не удалось синхронизировать источники' : 'Не удалось обновить дашборд');
+    const message = e && e.message ? e.message : 'Не удалось обновить данные';
+    setStatusBar(true, runSync ? 'Ошибка синхронизации' : 'Ошибка обновления', message, 'error', 100);
+    alert(message);
   } finally {
     btn.disabled = false;
     btn.textContent = 'Обновить витрину';
