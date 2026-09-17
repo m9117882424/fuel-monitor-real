@@ -31,3 +31,6 @@ tmp/
 *.bak
 *.bak_*
 wialon_fuel_tank_output/
+backups/
+diagnostics/
+*.bak-*
