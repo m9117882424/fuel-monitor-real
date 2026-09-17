@@ -3,10 +3,11 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import Cookie, Depends, FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi.responses import Response
 
 from .config import settings
+from .api import LIMITS_COOKIE_NAME, _is_limits_admin
 from .services.driver_registry_service import clear_driver_registry_cache, read_driver_file
 from .utils import now_local
 
@@ -50,7 +51,7 @@ _SCRIPT_HTML = r"""
         });
         const payload = await response.json().catch(function () { return {}; });
         if (!response.ok || !payload.ok) {
-          throw new Error(payload.detail || 'Не удалось загрузить разнарядку');
+          throw new Error(response.status === 401 ? 'Нужен вход в раздел лимитов для загрузки разнарядки' : (payload.detail || 'Не удалось загрузить разнарядку'));
         }
 
         alert('Разнарядка загружена: ' + (payload.rows || 0) + ' строк');
@@ -90,9 +91,20 @@ def _safe_filename(original_name: str, suffix: str) -> str:
     return f"{stamp} {cleaned}{suffix}"
 
 
+def check_roster_upload_access(
+    x_api_token: str | None = Header(default=None),
+    limits_admin_session: str | None = Cookie(default=None, alias=LIMITS_COOKIE_NAME),
+) -> None:
+    if settings.api_token and x_api_token == settings.api_token:
+        return
+    if _is_limits_admin(limits_admin_session):
+        return
+    raise HTTPException(status_code=401, detail="Unauthorized")
+
+
 def install_roster_upload(app: FastAPI) -> None:
     @app.post("/driver-roster/upload")
-    async def upload_driver_roster(file: UploadFile = File(...)):
+    async def upload_driver_roster(file: UploadFile = File(...), _: None = Depends(check_roster_upload_access)):
         original_name = file.filename or "raznaryadka.xlsx"
         suffix = Path(original_name).suffix.lower()
         if suffix not in ALLOWED_EXTENSIONS:

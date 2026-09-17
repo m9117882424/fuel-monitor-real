@@ -18,7 +18,7 @@ from .db import Base, engine, get_db
 from .models import FuelEvent, ImportRun, VehicleLimit
 from .schemas import HealthResponse, LimitUpsert, SyncResult, SyncRunResponse
 from .services.alert_service import refresh_alert_state
-from .services.driver_registry_service import load_driver_registry
+from .services.driver_registry_service import load_driver_registry_for_month
 from .services.storage import upsert_limits
 from .services.summary_service import build_monthly_vehicle_summary, fetch_events
 from .services.sync_service import sync_all
@@ -672,7 +672,9 @@ def _process_uploaded_shell_file(db: Session, file_path: Path) -> dict[str, Any]
 
 
 def check_api_token(x_api_token: str | None = Header(default=None)) -> None:
-    if settings.api_token and x_api_token != settings.api_token:
+    if not settings.api_token:
+        raise HTTPException(status_code=401, detail="API token is not configured")
+    if x_api_token != settings.api_token:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
@@ -685,6 +687,17 @@ def _is_limits_admin(session_cookie: str | None) -> bool:
     if not settings.limits_admin_password:
         return True
     return session_cookie == _admin_cookie_value()
+
+
+def check_write_access(
+    x_api_token: str | None = Header(default=None),
+    limits_admin_session: str | None = Cookie(default=None, alias=LIMITS_COOKIE_NAME),
+) -> None:
+    if settings.api_token and x_api_token == settings.api_token:
+        return
+    if _is_limits_admin(limits_admin_session):
+        return
+    raise HTTPException(status_code=401, detail="Unauthorized")
 
 
 def _latest_source_runs(db: Session) -> list[dict[str, Any]]:
@@ -794,12 +807,19 @@ def _summary_records_with_driver(db: Session, ym: str) -> list[dict[str, Any]]:
     if summary.empty:
         return []
 
-    driver_registry = load_driver_registry()
+    driver_registry = load_driver_registry_for_month(ym)
+    limit_notes = {
+        normalize_plate(v.plate): (v.note or "")
+        for v in db.query(VehicleLimit).all()
+        if v.plate
+    }
     rows = []
     for row in summary.to_dict(orient="records"):
         match = _pick_best_roster_match(str(row.get("plate", "") or ""), row.get("last_event_dt"), driver_registry)
         merged = dict(row)
         merged.update(match)
+        plate_key = normalize_plate(str(row.get("plate", "") or ""))
+        merged["note"] = limit_notes.get(plate_key, "")
         rows.append(_serialize_record(merged))
     return rows
 
@@ -820,7 +840,7 @@ def _all_limits_rows(db: Session, ym: str) -> list[dict[str, Any]]:
     }
     all_plates = sorted(plates_from_events | plates_from_limits)
 
-    driver_registry = load_driver_registry()
+    driver_registry = load_driver_registry_for_month(ym)
     limit_map = {normalize_plate(v.plate): v for v in db.query(VehicleLimit).all() if v.plate}
 
     rows: list[dict[str, Any]] = []
@@ -853,6 +873,7 @@ def _all_limits_rows(db: Session, ym: str) -> list[dict[str, Any]]:
             "cards_usage_pct": float(s.get("cards_usage_pct", 0) or 0),
             "status": s.get("status", "OK"),
             "worst_bucket": s.get("worst_bucket"),
+            "note": getattr(l, "note", None) or "",
         }
         rows.append(_serialize_record(row))
     return rows
@@ -1091,7 +1112,7 @@ def _leadership_html(ym: str) -> str:
         <table>
           <thead>
             <tr>
-              <th>Госномер</th><th>Водитель</th><th>Грейд</th><th>Дирекция</th><th>Режим</th><th>Turpak</th><th>Shell</th><th>Petrol</th><th>Cards</th><th class='total-col'>Total</th><th>Лимиты</th><th>Статус</th>
+              <th>Госномер</th><th>Водитель</th><th>Грейд</th><th>Дирекция</th><th>Режим</th><th>Turpak</th><th>Shell</th><th>Petrol</th><th>Cards</th><th class='total-col'>Total</th><th>Лимиты</th><th>Комментарий</th><th>Статус</th>
             </tr>
           </thead>
           <tbody id='vehicle-table'></tbody>
@@ -1184,14 +1205,14 @@ function renderVehicles(data) {
   const statusFilter = String(document.getElementById('vehicle-status-filter').value || 'all');
   const rows = (data.summary || []).filter(row => {
     const hay = [
-      row.plate, row.user_name, row.grade, row.directorate, row.vehicle_model, row.sources, row.status, formatMode(row)
+      row.plate, row.user_name, row.grade, row.directorate, row.vehicle_model, row.sources, row.note, row.status, formatMode(row)
     ].join(' ').toLowerCase();
     const bySearch = !q || hay.includes(q);
     const byStatus = statusFilter === 'all' || String(row.status || '') === statusFilter;
     return bySearch && byStatus;
   });
   if (!rows.length) {
-    tbody.innerHTML = '<tr><td colspan="12" class="empty">Нет данных</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="13" class="empty">Нет данных</td></tr>';
     return;
   }
   rows.forEach(row => {
@@ -1208,6 +1229,7 @@ function renderVehicles(data) {
       '<td>' + Number(row.cards_liters || 0).toFixed(0) + '</td>' +
       '<td class="total-cell">' + Number(row.total_liters || 0).toFixed(0) + '</td>' +
       '<td>' + formatLimitCell(row) + '</td>' +
+      '<td>' + escapeHtml(row.note || '—') + '</td>' +
       '<td><span class="' + statusBadgeClass(row.status) + '">' + row.status + '</span></td>';
     tr.addEventListener('click', function(){ openVehicleDetail(row); });
     tbody.appendChild(tr);
@@ -1357,7 +1379,7 @@ async function uploadShellFile(file) {
     payload = { detail: rawText || 'Сервер вернул пустой ответ' };
   }
   if (!res.ok || !payload.ok) {
-    const message = payload.detail || 'Не удалось загрузить и обработать файл Shell';
+    const message = res.status === 401 ? 'Нужен вход в раздел лимитов для загрузки файла Shell' : (payload.detail || 'Не удалось загрузить и обработать файл Shell');
     setStatusBar(true, 'Ошибка загрузки', message, 'error', 100);
     throw new Error(message);
   }
@@ -1385,7 +1407,7 @@ async function reloadDashboard(runSync) {
     if (runSync) {
       setStatusBar(true, 'Синхронизация источников', 'Стартовал sync. Ждём ответ сервера.', 'sync', 35);
       const syncRes = await fetch('/dashboard/refresh', { method: 'POST' });
-      if (!syncRes.ok) throw new Error('Sync failed');
+      if (!syncRes.ok) throw new Error(syncRes.status === 401 ? 'Нужен вход в раздел лимитов для синхронизации источников' : 'Sync failed');
       setStatusBar(true, 'Синхронизация источников', 'Синхронизация завершена. Перечитываем витрину.', 'load', 70);
     }
 
@@ -1500,6 +1522,7 @@ th,td{border-bottom:1px solid #e2e8f0;padding:10px 8px;text-align:left;font-size
 th{color:#64748b}
 input[type=number]{width:120px;padding:8px;border:1px solid #cbd5e1;border-radius:12px}
 select{padding:8px;border:1px solid #cbd5e1;border-radius:12px}
+textarea{min-width:220px;min-height:44px;padding:8px;border:1px solid #cbd5e1;border-radius:12px;font-size:14px;font-family:inherit}
 .muted{color:#64748b}.small{font-size:12px;color:#64748b}.row-btn{padding:8px 12px;border-radius:12px}
 </style>
 </head>
@@ -1526,7 +1549,7 @@ select{padding:8px;border:1px solid #cbd5e1;border-radius:12px}
     </div>
     <table>
       <thead>
-        <tr><th>Госномер</th><th>Водитель</th><th>Грейд</th><th>Дирекция</th><th>Режим</th><th>Общий</th><th>Turpak</th><th>Shell+Petrol</th><th>Безлимит</th><th>Сохранить</th></tr>
+        <tr><th>Госномер</th><th>Водитель</th><th>Грейд</th><th>Дирекция</th><th>Режим</th><th>Общий</th><th>Turpak</th><th>Shell+Petrol</th><th>Безлимит</th><th>Комментарий</th><th>Сохранить</th></tr>
       </thead>
       <tbody id='limits-table'></tbody>
     </table>
@@ -1556,6 +1579,14 @@ select{padding:8px;border:1px solid #cbd5e1;border-radius:12px}
 </div>
 <script>
 let limitsRows = [];
+function escapeHtml(value) {
+  return String(value == null ? '' : value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
 function buildRow(row){
   const tr=document.createElement('tr');
   tr.dataset.plate=row.plate;
@@ -1571,6 +1602,7 @@ function buildRow(row){
     '<td><input class="turpak" type="number" step="0.01" value="'+Number(row.turpak_limit_liters||0)+'"/></td>'+
     '<td><input class="cards" type="number" step="0.01" value="'+Number(row.cards_limit_liters||0)+'"/></td>'+
     '<td><input class="unlimited" type="checkbox" '+(row.unlimited?'checked':'')+'/></td>'+
+    '<td><textarea class="note" rows="2" placeholder="Комментарий">'+escapeHtml(row.note||'')+'</textarea></td>'+
     '<td><button class="row-btn save-one">Сохранить</button></td>';
   function apply(){
     const mode=tr.querySelector('.mode').value;
@@ -1592,7 +1624,8 @@ function rowPayload(tr){
     unlimited: tr.querySelector('.unlimited').checked,
     combined_limit_liters: Number(tr.querySelector('.combined').value||0),
     turpak_limit_liters: Number(tr.querySelector('.turpak').value||0),
-    cards_limit_liters: Number(tr.querySelector('.cards').value||0)
+    cards_limit_liters: Number(tr.querySelector('.cards').value||0),
+    note: tr.querySelector('.note').value
   };
 }
 async function saveRow(tr){
@@ -1607,14 +1640,14 @@ function renderLimitsTable(){
   const q = String(document.getElementById('limits-search').value || '').trim().toLowerCase();
   const modeFilter = String(document.getElementById('limits-mode-filter').value || 'all');
   const rows = limitsRows.filter(row => {
-    const hay = [row.plate, row.user_name, row.grade, row.directorate].join(' ').toLowerCase();
+    const hay = [row.plate, row.user_name, row.grade, row.directorate, row.note].join(' ').toLowerCase();
     const bySearch = !q || hay.includes(q);
     const rowMode = row.unlimited ? 'unlimited' : (row.limit_mode || 'combined');
     const byMode = modeFilter === 'all' || rowMode === modeFilter;
     return bySearch && byMode;
   });
   if(!rows.length){
-    tbody.innerHTML = '<tr><td colspan="10" class="small">Нет данных</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="11" class="small">Нет данных</td></tr>';
     return;
   }
   rows.forEach(r => tbody.appendChild(buildRow(r)));
@@ -1670,7 +1703,7 @@ def leadership_data(year_month: str | None = None, db: Session = Depends(get_db)
     alert_registry = refresh_alert_state(db, summary_df, ym)
     alerts = [] if alert_registry.empty else alert_registry.to_dict(orient="records")
 
-    driver_registry = load_driver_registry()
+    driver_registry = load_driver_registry_for_month(ym)
     enriched_alerts = []
     for row in alerts:
         match = _pick_best_roster_match(str(row.get("plate", "") or ""), row.get("last_event_dt"), driver_registry)
@@ -1694,7 +1727,11 @@ def leadership_data(year_month: str | None = None, db: Session = Depends(get_db)
 
 
 @app.post("/shell/upload")
-async def shell_upload(file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def shell_upload(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    _: None = Depends(check_write_access),
+):
     saved_path: Path | None = None
     archived_path: Path | None = None
     try:
@@ -1726,14 +1763,27 @@ async def shell_upload(file: UploadFile = File(...), db: Session = Depends(get_d
         return JSONResponse(result)
     except HTTPException as exc:
         db.rollback()
+        if saved_path is not None and archived_path is None:
+            try:
+                saved_path.unlink(missing_ok=True)
+            except Exception:
+                pass
         return JSONResponse(status_code=exc.status_code, content={"ok": False, "detail": str(exc.detail)})
     except Exception as exc:
         db.rollback()
+        if saved_path is not None and archived_path is None:
+            try:
+                saved_path.unlink(missing_ok=True)
+            except Exception:
+                pass
         return JSONResponse(status_code=500, content={"ok": False, "detail": f"Ошибка загрузки Shell: {exc}"})
 
 
 @app.post("/dashboard/refresh")
-def dashboard_refresh(db: Session = Depends(get_db)):
+def dashboard_refresh(
+    db: Session = Depends(get_db),
+    _: None = Depends(check_write_access),
+):
     results, report_path = sync_all(db, build_report=True, send_report=False)
     _dedupe_shell_events(db, current_year_month())
     return {"ok": True, "results": [r.__dict__ for r in results], "report_path": report_path}
