@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from .config import settings
 from .db import Base, engine, get_db
 from .models import FuelEvent, ImportRun, VehicleLimit
+from .fuel_report import router as fuel_report_router
 from .schemas import HealthResponse, LimitUpsert, SyncResult, SyncRunResponse
 from .services.alert_service import refresh_alert_state
 from .services.driver_registry_service import load_driver_registry_for_month
@@ -25,6 +26,7 @@ from .services.sync_service import sync_all
 from .utils import current_year_month, normalize_plate, now_local
 
 app = FastAPI(title=settings.app_name)
+app.include_router(fuel_report_router)
 Base.metadata.create_all(bind=engine)
 
 LIMITS_COOKIE_NAME = "limits_admin_session"
@@ -1106,6 +1108,7 @@ def _leadership_html(ym: str) -> str:
       <button id='sync-btn' type='button'>Синхронизировать источники</button>
       <button id='refresh-btn' type='button'>Обновить витрину</button>
       <a class='btn' href='/limits-admin'>Лимиты</a>
+      <a class='btn' href='/fuel-report'>Отчет по топливу</a>
       <a class='btn primary' href='/reports/latest'>Скачать отчёт</a>
     </div>
   </div>
