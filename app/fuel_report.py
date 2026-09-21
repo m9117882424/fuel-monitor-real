@@ -10,6 +10,7 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from .db import get_db
@@ -58,10 +59,10 @@ def _selected_sources(raw: str) -> list[str]:
 def _station_display(source_key: str, station_code, station_name) -> str:
     name = str(station_name or "").strip()
     code = str(station_code or "").strip()
+    if source_key == "turpak" and code:
+        return TURPAK_STATION_MAP.get(code, name or code)
     if name:
         return name
-    if source_key == "turpak" and code:
-        return TURPAK_STATION_MAP.get(code, code)
     return code or "—"
 
 
@@ -80,27 +81,69 @@ def _load_rows(db: Session, start_day: date, end_day: date, selected: list[str])
 
     start_dt = datetime.combine(start_day, time.min, tzinfo=TZ)
     end_dt = datetime.combine(end_day + timedelta(days=1), time.min, tzinfo=TZ)
-    db_sources = [value for key in selected for value in SOURCE_DB_VALUES[key]]
-    items = (
-        db.query(FuelEvent)
-        .filter(FuelEvent.event_dt >= start_dt, FuelEvent.event_dt < end_dt, FuelEvent.source.in_(db_sources))
-        .order_by(FuelEvent.event_dt.asc(), FuelEvent.plate.asc(), FuelEvent.id.asc())
-        .all()
-    )
-    rows = []
-    for event in items:
-        source_key = _source_key(str(getattr(event, "source", "") or ""))
-        event_dt = getattr(event, "event_dt", None)
-        if event_dt is not None and event_dt.tzinfo is not None:
-            event_dt = event_dt.astimezone(TZ)
-        rows.append({
-            "source_key": source_key,
-            "source_label": SOURCE_LABELS.get(source_key, source_key),
-            "station": _station_display(source_key, getattr(event, "station_code", None), getattr(event, "station_name", None)),
-            "plate": str(getattr(event, "plate", "") or "").strip() or "—",
-            "event_dt": event_dt,
-            "liters": float(getattr(event, "liters", 0) or 0),
-        })
+    rows: list[dict] = []
+
+    if "turpak" in selected:
+        full_turpak = db.execute(
+            text(
+                """
+                SELECT event_dt, plate, liters, station_code, station_name
+                FROM public.turpak_fuel_events_all
+                WHERE event_dt >= :start_dt AND event_dt < :end_dt
+                ORDER BY event_dt, plate, id
+                """
+            ),
+            {"start_dt": start_dt, "end_dt": end_dt},
+        ).mappings()
+        for event in full_turpak:
+            event_dt = event["event_dt"]
+            if event_dt is not None and event_dt.tzinfo is not None:
+                event_dt = event_dt.astimezone(TZ)
+            rows.append({
+                "source_key": "turpak",
+                "source_label": SOURCE_LABELS["turpak"],
+                "station": _station_display("turpak", event["station_code"], event["station_name"]),
+                "plate": str(event["plate"] or "").strip() or "—",
+                "event_dt": event_dt,
+                "liters": float(event["liters"] or 0),
+            })
+
+    card_sources = [
+        value
+        for key in selected
+        if key != "turpak"
+        for value in SOURCE_DB_VALUES[key]
+    ]
+    if card_sources:
+        items = (
+            db.query(FuelEvent)
+            .filter(
+                FuelEvent.event_dt >= start_dt,
+                FuelEvent.event_dt < end_dt,
+                FuelEvent.source.in_(card_sources),
+            )
+            .order_by(FuelEvent.event_dt.asc(), FuelEvent.plate.asc(), FuelEvent.id.asc())
+            .all()
+        )
+        for event in items:
+            source_key = _source_key(str(getattr(event, "source", "") or ""))
+            event_dt = getattr(event, "event_dt", None)
+            if event_dt is not None and event_dt.tzinfo is not None:
+                event_dt = event_dt.astimezone(TZ)
+            rows.append({
+                "source_key": source_key,
+                "source_label": SOURCE_LABELS.get(source_key, source_key),
+                "station": _station_display(
+                    source_key,
+                    getattr(event, "station_code", None),
+                    getattr(event, "station_name", None),
+                ),
+                "plate": str(getattr(event, "plate", "") or "").strip() or "—",
+                "event_dt": event_dt,
+                "liters": float(getattr(event, "liters", 0) or 0),
+            })
+
+    rows.sort(key=lambda row: (row["event_dt"] or datetime.min.replace(tzinfo=TZ), row["plate"]))
     return rows
 
 
