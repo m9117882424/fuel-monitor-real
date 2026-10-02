@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -36,6 +36,7 @@ class SourceSyncResult:
     rows_received: int | None = None
     rows_normalized: int | None = None
     duplicate_rows: int | None = None
+    status: str = 'ok'
 
 
 def _sync_stats_detail(
@@ -95,6 +96,7 @@ def _finish_source_sync(
         rows_received=rows_received,
         rows_normalized=rows_normalized,
         duplicate_rows=duplicate_rows,
+        status=status,
     )
 
 
@@ -121,7 +123,7 @@ def _track_run_finish(db: Session, run: ImportRun, rows_loaded: int, status: str
     run.rows_loaded = rows_loaded
     run.status = status
     run.detail = detail
-    run.finished_at = datetime.utcnow()
+    run.finished_at = datetime.now(timezone.utc)
     db.add(run)
     db.commit()
 
@@ -206,7 +208,7 @@ def _sync_shell_file_fallback(db: Session, run: ImportRun, api_error: str | None
         if api_error:
             detail = f'Shell API error: {api_error}; fallback file not found'
         _track_run_finish(db, run, 0, status='error' if api_error else 'skipped', detail=detail)
-        return SourceSyncResult(source='shell_excel', rows_loaded=0, detail=detail)
+        return SourceSyncResult(source='shell_excel', rows_loaded=0, detail=detail, status='error' if api_error else 'skipped')
 
     raw = read_shell_excel(path)
     events = normalize_shell_df(raw)
@@ -267,7 +269,7 @@ def sync_shell(db: Session) -> SourceSyncResult:
 
         detail = 'Shell SOAP credentials are not configured'
         _track_run_finish(db, run, 0, status='skipped', detail=detail)
-        return SourceSyncResult(source='shell_excel', rows_loaded=0, detail=detail)
+        return SourceSyncResult(source='shell_excel', rows_loaded=0, detail=detail, status='skipped')
 
     except requests.exceptions.RequestException as exc:
         db.rollback()
@@ -278,10 +280,10 @@ def sync_shell(db: Session) -> SourceSyncResult:
                 db.rollback()
                 detail = f'Shell API error: {exc}; fallback error: {fallback_exc}'
                 _track_run_finish(db, run, 0, status='error', detail=detail)
-                return SourceSyncResult(source='shell_excel', rows_loaded=0, detail=detail)
+                return SourceSyncResult(source='shell_excel', rows_loaded=0, detail=detail, status='error')
         detail = f'Shell request error: {exc}'
         _track_run_finish(db, run, 0, status='error', detail=detail)
-        return SourceSyncResult(source='shell_excel', rows_loaded=0, detail=detail)
+        return SourceSyncResult(source='shell_excel', rows_loaded=0, detail=detail, status='error')
     except Exception as exc:
         db.rollback()
         if settings.shell_file_fallback_enabled:
@@ -291,9 +293,9 @@ def sync_shell(db: Session) -> SourceSyncResult:
                 db.rollback()
                 detail = f'Shell API error: {exc}; fallback error: {fallback_exc}'
                 _track_run_finish(db, run, 0, status='error', detail=detail)
-                return SourceSyncResult(source='shell_excel', rows_loaded=0, detail=detail)
+                return SourceSyncResult(source='shell_excel', rows_loaded=0, detail=detail, status='error')
         _track_run_finish(db, run, 0, status='error', detail=str(exc))
-        return SourceSyncResult(source='shell_excel', rows_loaded=0, detail=f'error: {exc}')
+        return SourceSyncResult(source='shell_excel', rows_loaded=0, detail=f'error: {exc}', status='error')
 
 
 def sync_petrol(db: Session) -> SourceSyncResult:
@@ -352,7 +354,7 @@ def sync_petrol(db: Session) -> SourceSyncResult:
         if not path or not path.exists():
             detail = 'Petrol API credentials not configured and Petrol file not found'
             _track_run_finish(db, run, 0, status='skipped', detail=detail)
-            return SourceSyncResult(source='petrol', rows_loaded=0, detail=detail)
+            return SourceSyncResult(source='petrol', rows_loaded=0, detail=detail, status='skipped')
 
         raw = read_tabular_file(path)
         events = normalize_petrol_df(raw)
@@ -373,16 +375,16 @@ def sync_petrol(db: Session) -> SourceSyncResult:
         db.rollback()
         detail = f'Petrol API timeout: {exc}'
         _track_run_finish(db, run, 0, status='error', detail=detail)
-        return SourceSyncResult(source='petrol', rows_loaded=0, detail=detail)
+        return SourceSyncResult(source='petrol', rows_loaded=0, detail=detail, status='error')
     except requests.exceptions.RequestException as exc:
         db.rollback()
         detail = f'Petrol request error: {exc}'
         _track_run_finish(db, run, 0, status='error', detail=detail)
-        return SourceSyncResult(source='petrol', rows_loaded=0, detail=detail)
+        return SourceSyncResult(source='petrol', rows_loaded=0, detail=detail, status='error')
     except Exception as exc:
         db.rollback()
         _track_run_finish(db, run, 0, status='error', detail=str(exc))
-        return SourceSyncResult(source='petrol', rows_loaded=0, detail=f'error: {exc}')
+        return SourceSyncResult(source='petrol', rows_loaded=0, detail=f'error: {exc}', status='error')
 
 
 def sync_turpak(db: Session) -> SourceSyncResult:
@@ -391,7 +393,7 @@ def sync_turpak(db: Session) -> SourceSyncResult:
         if not settings.turpak_company_name or not settings.turpak_password:
             detail = 'Turpak credentials not configured'
             _track_run_finish(db, run, 0, status='skipped', detail=detail)
-            return SourceSyncResult(source='turpak', rows_loaded=0, detail=detail)
+            return SourceSyncResult(source='turpak', rows_loaded=0, detail=detail, status='skipped')
 
         start_dt, end_dt = _format_turpak_window(db)
         client = TurpakClient(
@@ -417,7 +419,7 @@ def sync_turpak(db: Session) -> SourceSyncResult:
     except Exception as exc:
         db.rollback()
         _track_run_finish(db, run, 0, status='error', detail=str(exc))
-        return SourceSyncResult(source='turpak', rows_loaded=0, detail=f'error: {exc}')
+        return SourceSyncResult(source='turpak', rows_loaded=0, detail=f'error: {exc}', status='error')
 
 
 def sync_all(db: Session, build_report: bool = True, send_report: bool = False) -> tuple[list[SourceSyncResult], str | None]:

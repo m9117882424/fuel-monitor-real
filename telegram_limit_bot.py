@@ -31,6 +31,21 @@ def _env(name: str, default: str = '') -> str:
     return os.getenv(name, default).strip()
 
 
+def _safe_error_text(error: Any, max_length: int = 500) -> str:
+    """Keep exception diagnostics without bot credentials or request URLs."""
+    text = f'{type(error).__name__}: {error}' if isinstance(error, BaseException) else str(error)
+    for token in (
+        _env('TELEGRAM_LIMIT_BOT_TOKEN'),
+        _env('TELEGRAM_BOT_TOKEN'),
+        str(getattr(settings, 'telegram_bot_token', '') or '').strip(),
+    ):
+        if token:
+            text = text.replace(token, '[redacted-token]')
+    text = re.sub(r'\b\d{5,}:[A-Za-z0-9_-]{20,}\b', '[redacted-token]', text)
+    text = re.sub(r"https?://[^\s'\"<>]+", '[redacted-url]', text, flags=re.IGNORECASE)
+    return text.replace('\r', '\\r').replace('\n', '\\n')[:max_length]
+
+
 def _bot_token() -> str:
     # Dedicated token for the /limit bot has priority so it does not conflict
     # with the main Telegram bot that may already use getUpdates/webhook.
@@ -115,7 +130,7 @@ def _send_message(
 
     response = requests.post(_api_url('sendMessage'), json=payload, timeout=30)
     if not response.ok:
-        print('[WARN] sendMessage failed:', response.status_code, response.text[:500], flush=True)
+        print('[WARN] sendMessage failed:', response.status_code, _safe_error_text(response.text), flush=True)
     return response.ok
 
 
@@ -123,7 +138,7 @@ def _send_chat_action(chat_id: int | str, action: str = 'typing') -> None:
     try:
         requests.post(_api_url('sendChatAction'), json={'chat_id': chat_id, 'action': action}, timeout=10)
     except Exception as exc:
-        print('[WARN] sendChatAction failed:', repr(exc), flush=True)
+        print('[WARN] sendChatAction failed:', _safe_error_text(exc), flush=True)
 
 
 def _warm_caches() -> None:
@@ -136,7 +151,7 @@ def _warm_caches() -> None:
         print(f'[INFO] driver registry cache warmed: rows={rows} seconds={elapsed:.3f}', flush=True)
     except Exception as exc:
         elapsed = time.perf_counter() - started
-        print(f'[WARN] driver registry cache warm failed after {elapsed:.3f}s: {exc!r}', flush=True)
+        print(f'[WARN] driver registry cache warm failed after {elapsed:.3f}s: {_safe_error_text(exc)}', flush=True)
 
 
 def _get_updates(offset: int | None) -> list[dict[str, Any]]:
@@ -366,8 +381,8 @@ def _handle_update(update: dict[str, Any], allowed_chat_ids: set[str]) -> None:
         try:
             _handle_limit(int(chat_id), message_id, text)
         except Exception as exc:
-            print('[ERROR] /limit failed:', repr(exc), flush=True)
-            _send_message(chat_id, f'Ошибка при расчёте лимита: {exc}', reply_to_message_id=message_id)
+            print('[ERROR] /limit failed:', _safe_error_text(exc), flush=True)
+            _send_message(chat_id, f'Ошибка при расчёте лимита: {_safe_error_text(exc)}', reply_to_message_id=message_id)
         return
 
     awaiting = str(chat_id) in AWAITING_LIMIT_PLATE
@@ -386,8 +401,8 @@ def _handle_update(update: dict[str, Any], allowed_chat_ids: set[str]) -> None:
         try:
             _send_limit_result(int(chat_id), message_id, plate, year_month)
         except Exception as exc:
-            print('[ERROR] /limit failed:', repr(exc), flush=True)
-            _send_message(chat_id, f'Ошибка при расчёте лимита: {exc}', reply_to_message_id=message_id)
+            print('[ERROR] /limit failed:', _safe_error_text(exc), flush=True)
+            _send_message(chat_id, f'Ошибка при расчёте лимита: {_safe_error_text(exc)}', reply_to_message_id=message_id)
         return
 
 
@@ -415,7 +430,7 @@ def main() -> int:
             print('[STOP] KeyboardInterrupt', flush=True)
             return 0
         except Exception as exc:
-            print('[ERROR] polling failed:', repr(exc), flush=True)
+            print('[ERROR] polling failed:', _safe_error_text(exc), flush=True)
             time.sleep(5)
 
 
